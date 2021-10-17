@@ -832,7 +832,7 @@ make_path $DataDir;
 
 make_path $CacheDir;
 
-open STDOUT, ">", catfile($DataDir, "log.txt");
+open STDOUT, ">", catfile($DataDir, "buildBeatSaberPlaylist.txt");
 open STDERR, ">&STDOUT";
 
 say "Starting run at ", ts();
