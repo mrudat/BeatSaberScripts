@@ -28,10 +28,17 @@ my $PlayListFolder = catdir($BeatSaberFolder, "Playlists");
 
 my $BeatSaviorDataFolder = catdir($ENV{appdata},"Beat Savior Data");
 
-my $SecondsPerDay = 60 * 60 * 24;
+my $BeatSaberAppdataFolder = catdir($ENV{localappdata},updir(),"LocalLow","Hyperboloc Magnetism","Beat Saber");
+
+my $SecondsPerDay = 60 * 60 * 24.0;
+
+my ($RenameLevels) = {
+  '$100Bills' => "100Bills",
+};
 
 my ($SameSongs) = {
   "custom_level_B68BF61AC6BE0E128BE32A85810D42E7C53F4756" => "BeatSaber",
+  "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74" => "custom_level_45F9480A43DDEA9FF338BF449AD9EAD62F73EB52",
 };
 
 my $Now = time();
@@ -145,6 +152,11 @@ sub loadOSTOrDLCBeatMap {
         if (isBeatmapTooShort($beatmap)){
           undef $level_id;
           next;
+        }
+
+        # TODO if we actually parse the file, we wouldn't need to do this.
+        while (exists $RenameLevels->{$level_id}) {
+          $level_id = $RenameLevels->{$level_id};
         }
 
         $beatmaps->{$level_id}{$game_mode}{$difficulty} = $beatmap;
@@ -682,14 +694,30 @@ sub buildPlaylists {
     }
   }
 
+  my $favourites;
+
+  my $player_data_file = catfile($BeatSaberAppdataFolder, "PlayerData.dat");
+  if (-f $player_data_file) {
+    my $player_data = decode_json(read_file($player_data_file));
+
+    # TODO read top scores from player_data for 'unplayed' levels?
+    #$player_data->{localPlayers}[0]{levelsStatsData}
+
+    foreach my $level_id (@{$player_data->{localPlayers}[0]{favouriteLevelIDs}}) {
+      $favourites->{$level_id} = 1;
+      my $song_id = $level_id;
+      while (exists $SameSongs->{$song_id}) {
+        $song_id = $SameSongs->{$song_id};
+        $favourites->{$song_id} = 1;
+      }
+    }
+  }
+
   my ($total_hand_speed, $total_hit_speed, $hand_speed_count);
 
 
   foreach my $level_id (keys %{$beatmaps}) {
     my $song_id = $level_id;
-    while (exists $SameSongs->{$song_id}) {
-      $song_id = $SameSongs->{$song_id};
-    }
     foreach my $game_mode (keys %{$beatmaps->{$level_id}}) {
       foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
         my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
@@ -740,7 +768,7 @@ sub buildPlaylists {
 
     my $max_weight = 0;
     my $victim;
-    my $victim2;
+    #my $victim2;
 
     my $min_age = ${$beatmaps}[0]{age};
 
@@ -765,7 +793,7 @@ sub buildPlaylists {
       $weight += $speed_weight;
 
       next unless $weight > $max_weight;
-      $victim2 = $victim;
+      #$victim2 = $victim;
       $victim = $beatmap;
       $max_weight = $weight;
 
@@ -775,14 +803,14 @@ sub buildPlaylists {
     # sometimes choose the second-best beatmap to see if we've improved?
     #$victim = $victim2 if (defined $victim2) && (rand(1) > 0.9);
 
-    my $age = $min_age;
     my $weight = $victim->{weight};
-    say "$age $weight";
-    while ($age > 1) {
-      $age--;
-      $weight = $weight * 1.1;
-    }
-    say "$age $weight";
+
+    # play favouries more often
+    $weight++ if exists $favourites->{$song_id};
+
+    my $age = $min_age;
+    $weight += log($age) / log(10);
+
     $victim->{weight} = $weight;
 
     $total_weight += $victim->{weight};
@@ -818,6 +846,8 @@ sub buildPlaylists {
   );
 
   @{$workout} = sort { $a->{speed_weight} <=> $b->{speed_weight} } @{$workout};
+
+  push @{$workout}, shift @{$workout};
 
   writePlaylist(
     $workout,
