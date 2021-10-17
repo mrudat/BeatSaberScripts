@@ -682,6 +682,9 @@ sub buildPlaylists {
     }
   }
 
+  my ($total_hand_speed, $total_hit_speed, $hand_speed_count);
+
+
   foreach my $level_id (keys %{$beatmaps}) {
     my $song_id = $level_id;
     while (exists $SameSongs->{$song_id}) {
@@ -695,8 +698,11 @@ sub buildPlaylists {
 
         if (exists $beatmap->{average_hand_speed}) {
           my $average_hand_speed = $beatmap->{average_hand_speed};
-          $max_hand_speed = $average_hand_speed if ($average_hand_speed > $max_hand_speed);
           my $average_hit_speed = $beatmap->{average_hit_speed};
+          $total_hand_speed += $average_hand_speed;
+          $total_hit_speed += $average_hit_speed;
+          $hand_speed_count++;
+          $max_hand_speed = $average_hand_speed if ($average_hand_speed > $max_hand_speed);
           $max_hit_speed = $average_hit_speed if ($average_hit_speed > $max_hit_speed);
         }
 
@@ -720,6 +726,9 @@ sub buildPlaylists {
     }
   }
 
+  my $average_hand_speed_score = ($total_hand_speed / $hand_speed_count) / $max_hand_speed;
+  my $average_hit_speed_score = ($total_hit_speed / $hand_speed_count) / $max_hit_speed;
+
   my $candidates;
   my $total_weight;
 
@@ -737,8 +746,9 @@ sub buildPlaylists {
         $speed_weight = $beatmap->{average_hand_speed} / $max_hand_speed;
         $speed_weight += $beatmap->{average_hit_speed} / $max_hit_speed;
       } else {
+        # TODO build two candidate lists, one with a known average speed, one without; pick only one unknown song at a time?
         # TODO attempt to predict hand speed?
-        $speed_weight = 0.5 + 0.5;
+        $speed_weight = $average_hand_speed_score + $average_hit_speed_score;
       }
       $beatmap->{speed_weight} = $speed_weight;
       $weight += $speed_weight;
@@ -794,52 +804,6 @@ sub buildPlaylists {
     "Workout"
   );
 }
-
-=for comment
-
-  my $playlist_entry = {
-    levelID => "$songName",
-    difficulties => [
-      {
-        characteristic => $gameMode,
-        name => $difficulty,
-      }
-    ]
-  };
-
-  if (exists $beatmap->{song_data}) {
-    my $song_data = $beatmap->{song_data};
-    $playlist_entry->{songName} = $song_data->{_songName};
-    $playlist_entry->{levelAuthorName} = $song_data->{_levelAuthorName};
-  }
-
-  $stats{$songName}{$gameMode}{$difficulty} = {
-      playlistEntry => $playlist_entry,
-      duration => $duration,
-      scores => \@scores,
-      bestScore => $bestScore,
-  };
-
-  $stats{$levelID}{$gameMode}{$difficulty} ||= {
-    playlistEntry => {
-      songName => $song_data->{songName},
-      levelAuthorName => $song_data->{songMapper},
-      levelID => $levelID,
-      difficulties => [
-        {
-          characteristic => $gameMode,
-          name => $difficulty,
-        },
-      ],
-    },
-    duration => $song_data->{songDuration},
-    scores => [],
-    speeds => [],
-    bestScore => $song_data->{trackers}{scoreTracker}{personalBestRawRatio},
-  };
-
-=cut
-
 
 ##############################################################
 
