@@ -726,8 +726,11 @@ sub buildPlaylists {
     }
   }
 
-  my $average_hand_speed_score = ($total_hand_speed / $hand_speed_count) / $max_hand_speed;
-  my $average_hit_speed_score = ($total_hit_speed / $hand_speed_count) / $max_hit_speed;
+  my ($average_speed_weight) = 1;
+
+  if (defined $hand_speed_count) {
+    $average_speed_weight = (($total_hand_speed / $hand_speed_count) / $max_hand_speed) + (($total_hit_speed / $hand_speed_count) / $max_hit_speed);
+  }
 
   my $candidates;
   my $total_weight;
@@ -737,6 +740,14 @@ sub buildPlaylists {
 
     my $max_weight = 0;
     my $victim;
+    my $victim2;
+
+    my $min_age = ${$beatmaps}[0]{age};
+
+    foreach my $beatmap (@{$beatmaps}) {
+      my $age = $beatmap->{age};
+      $min_age = $age if $age < $min_age;
+    }
 
     foreach my $beatmap (@{$beatmaps}) {
       my $weight = 1 - $beatmap->{predicted_score};
@@ -748,21 +759,31 @@ sub buildPlaylists {
       } else {
         # TODO build two candidate lists, one with a known average speed, one without; pick only one unknown song at a time?
         # TODO attempt to predict hand speed?
-        $speed_weight = $average_hand_speed_score + $average_hit_speed_score;
+        $speed_weight = $average_speed_weight;
       }
       $beatmap->{speed_weight} = $speed_weight;
       $weight += $speed_weight;
-      if ($weight > $max_weight) {
-        $victim = $beatmap;
-        $max_weight = $weight;
-      }
-      my $age = $beatmap->{age};
-      while ($age > 1) {
-        $age--;
-        $weight = $weight * 1.1;
-      }
+
+      next unless $weight > $max_weight;
+      $victim2 = $victim;
+      $victim = $beatmap;
+      $max_weight = $weight;
+
       $beatmap->{weight} = $weight;
     }
+
+    # sometimes choose the second-best beatmap to see if we've improved?
+    #$victim = $victim2 if (defined $victim2) && (rand(1) > 0.9);
+
+    my $age = $min_age;
+    my $weight = $victim->{weight};
+    say "$age $weight";
+    while ($age > 1) {
+      $age--;
+      $weight = $weight * 1.1;
+    }
+    say "$age $weight";
+    $victim->{weight} = $weight;
 
     $total_weight += $victim->{weight};
 
