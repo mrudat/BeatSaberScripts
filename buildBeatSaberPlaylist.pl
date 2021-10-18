@@ -488,7 +488,6 @@ sub loadBeatSaviourData {
 
         $song_data->{timestamp} = $play_timestamp;
 
-        # TODO get note_jump_speed, it's different for Expert/Expert+
         my $note_jump_speed = $beatmap->{note_jump_speed} || $DEFAULT_NOTE_JUMP_SPEED;
 
         $note_jump_speed = $DEFAULT_NOTE_JUMP_SPEED if $note_jump_speed == 0;
