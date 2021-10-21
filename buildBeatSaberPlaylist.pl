@@ -34,6 +34,77 @@ my $BeatSaberAppdataFolder = catdir($ENV{localappdata},updir(),"LocalLow","Hyper
 
 my $SecondsPerDay = 60 * 60 * 24.0;
 
+my $WorkoutDuration = 40 * 60;
+
+# TODO actually parse the file format
+# from https://docs.google.com/spreadsheets/d/13wyoviJAplYOrsMocOA7YNXJxVRHd74G7z4U2jhCZa4
+my $VanillaMapBPM = {
+  "\$100Bills" => 201,
+  "BalearicPumping" => 111,
+  "BeatSaber" => 166,
+  "Breezer" => 112.5,
+  "CommercialPumping" => 105,
+  "CountryRounds" => 210,
+  "Escape" => 175,
+  "Legend" => 95,
+  "LvlInsane" => 160,
+  "TurnMeOn" => 80,
+
+  "BeThereForYou" => 126,
+  "Elixia" => 128,
+  "INeedYou" => 128,
+  "RumNBass" => 132,
+  "UnlimitedPower" => 198,
+
+  "Origins" => 175,
+  "ReasonForLiving" => 128,
+  "GiveALittleLove" => 128,
+  "FullCharge" => 125,
+  "Immortal" => 150,
+  "BurningSands" => 142,
+
+  "CrabRave" => 125,
+  "PopStars" => 170,
+  "OneHope" => 145,
+  "AngelVoices" => 166,
+  "FitBeat" => 215,
+
+  "Crystallized" => 174,
+  "CycleHit" => 175,
+  "WhatTheCat" => 200,
+  "ExitThisEarthsAtomosphere" => 170,
+  "Ghost" => 220,
+  "LightItUp" => 174,
+
+  "IntoTheDream" => 183,
+  "ItTakesMe" => 220,
+  "LudicrousPlus" => 260,
+  "SpinEternally" => 125,
+
+  "Boundless" => 170,
+  "EmojiVIP" => 163,
+  "Epic" => 128,
+  "FeelingStronger" => 175,
+  "Overkill" => 174,
+  "Rattlesnake" => 175,
+  "Stronger" => 170,
+  "ThisTime" => 160,
+  "TillItsOver" => 110,
+  "WeWontBeAlone" => 175,
+
+  "BadLiar" => 89,
+  "Believer" => 125,
+  "Digital" => 167,
+  "ItsTime" => 105,
+  "Machine" => 81,
+  "Natural" => 100,
+  "Radioactive" => 136.6,
+  "Thunder" => 168,
+  "Warriors" => 156,
+  "WhateverItTakes" => 135,
+};
+
+# TODO actually parse the file format?
 my ($RenameLevels) = {
   '$100Bills' => "100Bills",
 };
@@ -77,6 +148,16 @@ sub isBeatmapTooShort {
   return 1 unless ($#{$notes} +1) > 15;
 
   my $duration = $notes->[-1]{_time};
+
+  my $beats_per_minute = $beatmap->{beats_per_minute};
+
+  return 1 unless defined $beats_per_minute;
+
+  my $seconds_per_beat = 60 / $beats_per_minute;
+
+  $beatmap->{seconds_per_beat} = $seconds_per_beat;
+
+  $duration = $duration * $seconds_per_beat;
 
   # TODO use SongDurationCache?
   $beatmap->{duration} = $duration;
@@ -152,6 +233,14 @@ sub loadOSTOrDLCBeatMap {
           next;
         }
 
+        unless (exists $VanillaMapBPM->{$level_id}) {
+          say "dont know BPM for ", $level_id;
+          undef $level_id;
+          next;
+        }
+
+        $beatmap->{beats_per_minute} = $VanillaMapBPM->{$level_id};
+
         if (isBeatmapTooShort($beatmap)){
           undef $level_id;
           next;
@@ -164,6 +253,11 @@ sub loadOSTOrDLCBeatMap {
 
         # TODO read the actual value
         $beatmap->{note_jump_speed} = 0;
+
+        delete $beatmaps->{_events};
+
+        # TODO perhaps we should care about obstacles?
+        delete $beatmaps->{_obstacles};
 
         $beatmaps->{$level_id}{$game_mode}{$difficulty} = $beatmap;
         $cache->{$level_id}{$game_mode}{$difficulty} = $beatmap;
@@ -209,10 +303,20 @@ sub loadCustomBeatMaps {
 
         my $beatmap = decode_json(read_file($difficulty_file));
 
+        $beatmap->{beats_per_minute} = $song_data->{_beatsPerMinute};
+
         next if isBeatmapTooShort($beatmap);
 
-        $beatmap->{song_data} = $song_data;
         $beatmap->{note_jump_speed} = $difficulty_data->{_noteJumpMovementSpeed};
+
+        $beatmap->{songName} = $song_data->{_songName};
+        $beatmap->{songAuthorName} = $song_data->{_songAuthorName},
+        $beatmap->{levelAuthorName} = $song_data->{_levelAuthorName};
+
+        delete $beatmaps->{_events};
+
+        # TODO perhaps we should care about obstacles?
+        delete $beatmaps->{_obstacles};
 
         $beatmaps->{$level_id}{$game_mode}{$difficulty} = $beatmap;
       }
@@ -327,12 +431,6 @@ sub loadSongPlayHistoryData {
   }
 }
 
-# TODO calculate multiple models, and compare?
-my $regressionModels = [
-  # note_jump_speed
-  # time_since_last_hit
-  # distance_from_last_block?
-];
 my $regressionModel = [qw(n^2 n t^2 t c)];
 
 sub recordBloqHit {
@@ -341,6 +439,8 @@ sub recordBloqHit {
     $saber,
     $position,
     $direction,
+    $last_position,
+    $last_direction,
     $time_since_last_hit,
     $note_jump_speed,
     $score,
@@ -371,33 +471,72 @@ sub recordBloqHit {
   # 9 is the dot bloq; we use it later for if a particular saber/position/direction hasn't been hit before.
   push @directions, 9 if $direction != 9;
 
-  foreach $direction (@directions) {
-    my $data = ($bloq_stats->[$saber][$position][$direction] ||= {
-      minTime => 3600,
-      maxTime => 0,
-      stats => Statistics::Regression->new("$saber-$position-$direction", $regressionModel)
-    });
+  my @data;
 
-    $data->{minTime} = $time_since_last_hit if $time_since_last_hit < $data->{minTime};
-    $data->{maxTime} = $time_since_last_hit if $time_since_last_hit > $data->{maxTime};
+  if ($time_since_last_hit > 1) {
+    my $datum = $bloq_stats->{opening}[$saber][$position][$direction];
 
-    $data->{stats}->include($score, $t, $weight);
+    if (!defined $datum) {
+      $datum = {
+        minTime => 3600,
+        maxTime => 0,
+        stats => Statistics::Regression->new("$saber $position-$direction", $regressionModel)
+      };
+
+      push @{$bloq_stats->{stats}}, $datum;
+
+      $bloq_stats->{opening}[$saber][$position][$direction] = $datum;
+    }
+
+    push @data, $datum;
+  }
+
+  if (defined $last_position) {
+    my $datum = $bloq_stats->{pattern}[$saber][$last_position][$last_direction][$position][$direction];
+
+    if (!defined $datum) {
+      $datum = {
+        minTime => 3600,
+        maxTime => 0,
+        stats => Statistics::Regression->new("$saber $last_position-$last_direction -> $position-$direction", $regressionModel)
+      };
+
+      push @{$bloq_stats->{stats}}, $datum;
+
+      $bloq_stats->{pattern}[$saber][$last_position][$last_direction][$position][$direction] = $datum;
+    }
+
+    push @data, $datum;
+  }
+
+  foreach my $data (@data) {
+    foreach $direction (@directions) {
+      $data->{minTime} = $time_since_last_hit if $time_since_last_hit < $data->{minTime};
+      $data->{maxTime} = $time_since_last_hit if $time_since_last_hit > $data->{maxTime};
+
+      $data->{stats}->include($score, $t, $weight);
+    }
   }
 }
 
 sub recordBloqHits {
-  my ($bloq_stats, $notes, $note_jump_speed, $play_timestamp) = @_;
+  my ($bloq_stats, $hits, $note_jump_speed, $play_timestamp) = @_;
 
   my $last_hit_times;
+  my $last_positions;
+  my $last_directions;
 
-  foreach my $hit (@{$notes}) {
+  foreach my $hit (@{$hits}) {
     my $saber = $hit->{noteType};
     my $hit_time = $hit->{time};
+    #my $id = $hit->{id};
 
     my $last_hit_time = $last_hit_times->[$saber] || 0;
+    my $last_direction = $last_directions->[$saber];
+    my $last_position = $last_positions->[$saber];
     my $time_since_last_hit = $hit_time - $last_hit_time;
 
-    next if $time_since_last_hit <= 0; # <0 wtf?
+    next if $time_since_last_hit < 0; # <0 wtf?
     $time_since_last_hit = 2 if $time_since_last_hit > 2;
     my $direction = $hit->{noteDirection};
     my $position = $hit->{index};
@@ -411,6 +550,8 @@ sub recordBloqHits {
       $saber,
       $position,
       $direction,
+      $last_position,
+      $last_direction,
       $time_since_last_hit,
       $note_jump_speed,
       $score,
@@ -418,6 +559,8 @@ sub recordBloqHits {
     );
 
     $last_hit_times->[$saber] = $hit_time;
+    $last_directions->[$saber] = $direction;
+    $last_positions->[$saber] = $position;
   }
 }
 
@@ -499,7 +642,17 @@ sub loadBeatSaviourData {
           $play_timestamp
         );
 
+        $beatmap->{songName} ||= $song_data->{songName};
+        $beatmap->{songAuthorName} ||= $song_data->{songArtist},
+        $beatmap->{levelAuthorName} ||= $song_data->{songMapper};
+
         delete $song_data->{deepTrackers};
+        delete $song_data->{trackers}{hitTracker};
+        #delete $song_data->{trackers}{accuracyTracker};
+        #delete $song_data->{trackers}{scoreTracker};
+        delete $song_data->{trackers}{winTracker};
+        #delete $song_data->{trackers}{distanceTracker};
+        delete $song_data->{trackers}{scoreGraphTracker};
 
         push @{$beatmap->{beatSaviourData}}, $song_data;
       }
@@ -510,38 +663,34 @@ sub loadBeatSaviourData {
 
 sub calculateBloqStats {
   my ($bloq_stats) = @_;
-  foreach my $saber_stats (@{$bloq_stats}) {
-    foreach my $position_stats (@{$saber_stats}) {
-      foreach my $direction_stats (@{$position_stats}) {
-        next unless defined $direction_stats;
-        my $stats = $direction_stats->{stats};
-        delete $direction_stats->{stats};
-        my $minTime = $direction_stats->{minTime};
-        if ($stats->n() > $stats->k()) {
-          my ($a, $b, $c, $d, $e) = $stats->theta();
-          my $maxTime = $direction_stats->{maxTime};
-          $direction_stats->{func} = sub {
-            my ($time, $note_jump_speed) = @_;
-            return 0 if $time*2 < $minTime;
-            return 1 if $time < $minTime;
-            $time = $maxTime if $time > $maxTime;
-            return ($a * $note_jump_speed**2)
-                 + ($b * $note_jump_speed)
-                 + ($c * $time**2)
-                 + ($d * $time)
-                 +  $e;
-          };
-          eval { $stats->print(); };
-        } else {
-          my $average = $stats->ybar();
-          $direction_stats->{func} = sub {
-            my ($time) = @_;
-            return 0 if $time*2 < $minTime;
-            return 1 if $time < $minTime;
-            return $average;
-          };
-        }
-      }
+
+  foreach my $hit_stats (@{$bloq_stats->{stats}}) {
+    my $stats = $hit_stats->{stats};
+    delete $hit_stats->{stats};
+    my $minTime = $hit_stats->{minTime};
+    if ($stats->n() > $stats->k()) {
+      my ($a, $b, $c, $d, $e) = $stats->theta();
+      my $maxTime = $hit_stats->{maxTime};
+      $hit_stats->{func} = sub {
+        my ($time, $note_jump_speed) = @_;
+        return 0 if $time*2 < $minTime;
+        return 1 if $time < $minTime;
+        $time = $maxTime if $time > $maxTime;
+        return ($a * $note_jump_speed**2)
+              + ($b * $note_jump_speed)
+              + ($c * $time**2)
+              + ($d * $time)
+              +  $e;
+      };
+      eval { $stats->print(); };
+    } else {
+      my $average = $stats->ybar();
+      $hit_stats->{func} = sub {
+        my ($time) = @_;
+        return 0 if $time*2 < $minTime;
+        return 1 if $time < $minTime;
+        return $average;
+      };
     }
   }
 }
@@ -573,17 +722,6 @@ sub calculateBeatmapStats {
 
         if (exists $beatmap->{beatSaviourData}) {
           my $beat_saviour_data = $beatmap->{beatSaviourData};
-
-          if (!exists $beatmap->{song_data}) {
-            # TODO or something.
-            my $lastPlay = ${$beat_saviour_data}[-1];
-
-            $beatmap->{song_data} = {
-              "_songName" => $lastPlay->{songName},
-              "_songAuthorName" => $lastPlay->{songArtist},
-              "_levelAuthorName" => $lastPlay->{songMapper},
-            }
-          }
 
           my ($total_hit_speed, $total_hand_speed, $beatsavior_weight);
 
@@ -621,33 +759,49 @@ sub calculateBeatmapStats {
         my $notes = $beatmap->{_notes};
 
         my $last_times;
+        my $last_positions;
+        my $last_directions;
 
         my $total_score = 0;
         my $multiplier = 1;
         my $combo = 0;
-        my $max_score = ((($#{$notes} + 1) - 13) * 8 * 115) + 5611;
+        my $note_count = $#{$notes} + 1;
+        my $max_score = (($note_count - 13) * 8 * 115) + 5611;
+
+        my $seconds_per_beat = $beatmap->{seconds_per_beat};
+        next unless defined $seconds_per_beat;
+        my $notes_with_stats;
 
         foreach my $note (@{$notes}) {
           my $saber = $note->{_type};
           my $position = $note->{_lineIndex} + 4 * $note->{_lineLayer};
           my $direction = $note->{_cutDirection};
-          my $time = $note->{_time};
+          my $time = $note->{_time} * $seconds_per_beat;
 
           my $last_time = $last_times->[$saber] || 0;
+          my $last_direction = $last_directions->[$saber];
+          my $last_position = $last_positions->[$saber];
           my $time_since_last_note = $time - $last_time;
           my $note_score = 0;
 
-          if ($time_since_last_note == 0) {
-            $note_score = 1;
+          my $stats;
+          if ($time_since_last_note < 1 && defined $last_position) {
+            $stats = $bloq_stats->{pattern}[$saber][$last_position][$last_direction][$position][$direction]
+                  || $bloq_stats->{pattern}[$saber][$last_position][$last_direction][$position][9] 
+                  || $bloq_stats->{opening}[$saber][$position][$direction] 
+                  || $bloq_stats->{opening}[$saber][$position][9]
           } else {
-            my $stats = $bloq_stats->[$saber][$position][$direction] || $bloq_stats->[$saber][$position][9];
-            if (defined $stats) {
-              $note_score = $stats->{func}($time_since_last_note, $note_jump_speed);
-              $note_score = 115 if $note_score > 115;
-              $note_score = 0 if $note_score < 0;
-            } else {
-              $note_score = 1;
-            }
+            $stats = $bloq_stats->{opening}[$saber][$position][$direction] 
+                  || $bloq_stats->{opening}[$saber][$position][9];
+          }
+
+          if (defined $stats) {
+            $note_score = $stats->{func}($time_since_last_note, $note_jump_speed);
+            $note_score = 115 if $note_score > 115;
+            $note_score = 0 if $note_score < 0;
+            $notes_with_stats++;
+          } else {
+            $note_score = 1;
           }
 
           if ($note_score == 0) {
@@ -661,10 +815,16 @@ sub calculateBeatmapStats {
             $total_score += $multiplier * $note_score;
           }
           $last_times->[$saber] = $time;
+          $last_directions->[$saber] = $direction;
+          $last_positions->[$saber] = $position;
         }
 
-        $total_scores += 0.5 * ($total_score / $max_score);
-        $total_weight += 0.5;
+        my $weight = $notes_with_stats / $note_count;
+
+        $weight /= 2;
+
+        $total_scores += $weight * ($total_score / $max_score);
+        $total_weight += $weight;
 
         $beatmap->{predicted_score} = $total_scores / $total_weight;
       }
@@ -693,11 +853,9 @@ sub writePlaylist {
       $playlist_entry->{speed_weight} = $beatmap->{speed_weight};
     }
 
-    if (exists $beatmap->{song_data}) {
-      my $song_data = $beatmap->{song_data};
-      $playlist_entry->{songName} = $song_data->{_songName};
-      $playlist_entry->{levelAuthorName} = $song_data->{_levelAuthorName};
-    }
+    $playlist_entry->{songName} = $beatmap->{songName} if exists $beatmap->{songName};
+    $playlist_entry->{songAuthorName} = $beatmap->{songAuthorName} if exists $beatmap->{songAuthorName};
+    $playlist_entry->{levelAuthorName} = $beatmap->{levelAuthorName} if exists $beatmap->{levelAuthorNameName};
 
     push @{$songs}, $playlist_entry;
   }
@@ -768,8 +926,6 @@ sub buildPlaylists {
       foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
         my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
 
-        next if $beatmap->{predicted_score} < 0.6;
-
         if (exists $beatmap->{average_hand_speed}) {
           my $average_hand_speed = $beatmap->{average_hand_speed};
           my $average_hit_speed = $beatmap->{average_hit_speed};
@@ -784,9 +940,9 @@ sub buildPlaylists {
         $beatmap->{game_mode} = $game_mode;
         $beatmap->{difficulty} = $difficulty;
         if (!exists $beatmap->{average_score} ) {
-          if ($beatmap->{predicted_score} > 0.75) {
+          #if ($beatmap->{predicted_score} > 0.75) {
             push @{$unplayed}, $beatmap;
-          }
+          #}
           next;
         }
 
@@ -794,6 +950,8 @@ sub buildPlaylists {
         next if $age < 1.0;
 
         $beatmap->{age} = $age;
+
+        next if $beatmap->{predicted_score} < 0.6;
 
         push @{$songs->{$song_id}}, $beatmap;
       }
@@ -867,7 +1025,7 @@ sub buildPlaylists {
   my $total_time = 0;
   my $workout;
 
-  while($total_time < 3600 && keys %{$candidates}) {
+  while($total_time < $WorkoutDuration && keys %{$candidates}) {
     my $pick = rand($total_weight);
     foreach my $song_id (keys %{$candidates}) {
       my $candidate = $candidates->{$song_id};
@@ -917,7 +1075,7 @@ my $beatmaps = loadAllBeatMaps();
 
 loadSongPlayHistoryData($beatmaps);
 
-my ($bloq_stats) = [];
+my ($bloq_stats) = {};
 
 loadBeatSaviourData($beatmaps, $bloq_stats);
 
