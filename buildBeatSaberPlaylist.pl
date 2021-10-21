@@ -821,6 +821,8 @@ sub calculateBeatmapStats {
 
         my $weight = $notes_with_stats / $note_count;
 
+        $beatmap->{percentage_predicted_notes} = $weight * 100;
+
         $weight /= 2;
 
         $total_scores += $weight * ($total_score / $max_score);
@@ -831,6 +833,8 @@ sub calculateBeatmapStats {
     }
   }
 }
+
+my $OptionalPlaylistKeys = [qw(average_score speed_weight songName songAuthorName levelAuthorName percentage_predicted_notes)];
 
 sub writePlaylist {
   my ($beatmaps, $file_name, $title) = @_;
@@ -849,13 +853,9 @@ sub writePlaylist {
       predicted_score => $beatmap->{predicted_score},
     };
 
-    if (exists $beatmap->{speed_weight}) {
-      $playlist_entry->{speed_weight} = $beatmap->{speed_weight};
+    foreach my $key (@{$OptionalPlaylistKeys}) {
+      $playlist_entry->{$key} = $beatmap->{$key} if exists $beatmap->{$key};
     }
-
-    $playlist_entry->{songName} = $beatmap->{songName} if exists $beatmap->{songName};
-    $playlist_entry->{songAuthorName} = $beatmap->{songAuthorName} if exists $beatmap->{songAuthorName};
-    $playlist_entry->{levelAuthorName} = $beatmap->{levelAuthorName} if exists $beatmap->{levelAuthorNameName};
 
     push @{$songs}, $playlist_entry;
   }
@@ -940,9 +940,7 @@ sub buildPlaylists {
         $beatmap->{game_mode} = $game_mode;
         $beatmap->{difficulty} = $difficulty;
         if (!exists $beatmap->{average_score} ) {
-          #if ($beatmap->{predicted_score} > 0.75) {
-            push @{$unplayed}, $beatmap;
-          #}
+          push @{$unplayed}, $beatmap;
           next;
         }
 
@@ -982,8 +980,9 @@ sub buildPlaylists {
     }
 
     foreach my $beatmap (@{$beatmaps}) {
-      my $weight = 1 - $beatmap->{predicted_score};
-      $weight += 1 - $beatmap->{average_score};
+      #my $weight = 1 - $beatmap->{predicted_score};
+      #$weight += 1 - $beatmap->{average_score};
+      my $weight = $beatmap->{predicted_score} - $beatmap->{average_score};
       my $speed_weight;
       if (defined $beatmap->{average_hand_speed}) {
         $speed_weight = $beatmap->{average_hand_speed} / $max_hand_speed;
