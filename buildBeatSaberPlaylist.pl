@@ -922,9 +922,13 @@ sub buildPlaylists {
 
   foreach my $level_id (keys %{$beatmaps}) {
     my $song_id = $level_id;
+    while (exists $SameSongs->{$song_id}) {
+      $song_id = $SameSongs->{$song_id};
+    }
     foreach my $game_mode (keys %{$beatmaps->{$level_id}}) {
       foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
         my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
+        $beatmap->{song_id} = $song_id;
 
         if (exists $beatmap->{average_hand_speed}) {
           my $average_hand_speed = $beatmap->{average_hand_speed};
@@ -970,7 +974,6 @@ sub buildPlaylists {
 
     my $max_weight = 0;
     my $victim;
-    #my $victim2;
 
     my $min_age = ${$beatmaps}[0]{age};
 
@@ -988,7 +991,6 @@ sub buildPlaylists {
         $speed_weight = $beatmap->{average_hand_speed} / $max_hand_speed;
         $speed_weight += $beatmap->{average_hit_speed} / $max_hit_speed;
       } else {
-        # TODO build two candidate lists, one with a known average speed, one without; pick only one unknown song at a time?
         # TODO attempt to predict hand speed?
         $speed_weight = $average_speed_weight;
       }
@@ -996,15 +998,11 @@ sub buildPlaylists {
       $weight += $speed_weight;
 
       next unless $weight > $max_weight;
-      #$victim2 = $victim;
       $victim = $beatmap;
       $max_weight = $weight;
 
       $beatmap->{weight} = $weight;
     }
-
-    # sometimes choose the second-best beatmap to see if we've improved?
-    #$victim = $victim2 if (defined $victim2) && (rand(1) > 0.9);
 
     my $weight = $victim->{weight};
 
@@ -1021,8 +1019,27 @@ sub buildPlaylists {
     $candidates->{$song_id} = $victim;
   }
 
+  @{$unplayed} = sort { $b->{predicted_score} <=> $a->{predicted_score} } @{$unplayed};
+
   my $total_time = 0;
   my $workout;
+
+  if (@{$unplayed}) {
+    my $candidate = $unplayed->[0];
+    if ($candidate->{predicted_score} > 0.6) {
+      shift @{$unplayed};
+      $total_time += $candidate->{duration} + 30;
+      my $song_id = $candidate->{song_id};
+      if (exists $candidates->{$song_id}) {
+        my $victim = $candidates->{$song_id};
+        my $weight = $victim->{weight};
+        $total_weight -= $weight;
+        delete $candidates->{$song_id};
+      }
+      $candidate->{speed_weight} = $average_speed_weight;
+      push @$workout, $candidate;
+    }
+  }
 
   while($total_time < $WorkoutDuration && keys %{$candidates}) {
     my $pick = rand($total_weight);
@@ -1039,8 +1056,6 @@ sub buildPlaylists {
       $pick -= $weight;
     }
   }
-
-  @{$unplayed} = sort { $b->{predicted_score} <=> $a->{predicted_score} } @{$unplayed};
 
   writePlaylist(
     $unplayed,
