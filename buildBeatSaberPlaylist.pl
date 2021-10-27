@@ -36,6 +36,8 @@ my $SecondsPerDay = 60 * 60 * 24.0;
 
 my $WorkoutDuration = 40 * 60;
 
+my $MinimumScoreForWorkout = 0.6;
+
 # TODO actually parse the file format
 # from https://docs.google.com/spreadsheets/d/13wyoviJAplYOrsMocOA7YNXJxVRHd74G7z4U2jhCZa4
 my $VanillaMapBPM = {
@@ -111,8 +113,9 @@ my ($RenameLevels) = {
 
 my ($SameSongs) = {
   "custom_level_B68BF61AC6BE0E128BE32A85810D42E7C53F4756" => "BeatSaber",
-  "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74" => "custom_level_45F9480A43DDEA9FF338BF449AD9EAD62F73EB52",
-  "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74" => "custom_level_E6AF862558EF500F16D3B82161BBDFB1D2C296BF",
+  "custom_level_45F9480A43DDEA9FF338BF449AD9EAD62F73EB52" => "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74",
+  "custom_level_E6AF862558EF500F16D3B82161BBDFB1D2C296BF" => "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74",
+  "custom_level_A03CB0A107993BE5CDED1E91DC31E8A7B048F02A" => "custom_level_88A33C64E8FDE2A88D9A99799B9F58205C412B10",
 };
 
 my $Now = time();
@@ -163,6 +166,8 @@ sub isBeatmapTooShort {
   $beatmap->{duration} = $duration;
 
   return 1 unless $duration > 60;
+  # TODO play song faster?
+  return 1 unless $duration < (5 * 60);
 
   return 0;
 }
@@ -449,7 +454,11 @@ sub recordBloqHit {
 
   $time_since_last_hit = 2 if $time_since_last_hit > 2;
 
+  my $age = ($Now - $timestamp) / $SecondsPerDay;
+
   my $t = [
+    #$age**2,
+    #$age,
     $note_jump_speed**2,
     $note_jump_speed,
     $time_since_last_hit**2,
@@ -459,9 +468,8 @@ sub recordBloqHit {
 
   my (@directions);
 
-  my $age = ($Now - $timestamp) / $SecondsPerDay;
-
   my $weight = 1.0 / $age;
+  #my $weight;
 
   # TODO is it better to track each one separately?
   $score = $score->[0] + $score->[1] + $score->[2];
@@ -668,9 +676,11 @@ sub calculateBloqStats {
     my $stats = $hit_stats->{stats};
     delete $hit_stats->{stats};
     my $minTime = $hit_stats->{minTime};
+    my $weight = 0.01;
     if ($stats->n() > $stats->k()) {
       my ($a, $b, $c, $d, $e) = $stats->theta();
       my $maxTime = $hit_stats->{maxTime};
+      eval { $weight = $stats->rsq(); };
       $hit_stats->{func} = sub {
         my ($time, $note_jump_speed) = @_;
         return 0 if $time*2 < $minTime;
@@ -692,6 +702,7 @@ sub calculateBloqStats {
         return $average;
       };
     }
+    $hit_stats->{weight} = $weight;
   }
 }
 
@@ -799,7 +810,7 @@ sub calculateBeatmapStats {
             $note_score = $stats->{func}($time_since_last_note, $note_jump_speed);
             $note_score = 115 if $note_score > 115;
             $note_score = 0 if $note_score < 0;
-            $notes_with_stats++;
+            $notes_with_stats += $stats->{weight};
           } else {
             $note_score = 1;
           }
@@ -890,10 +901,15 @@ sub buildPlaylists {
     foreach my $song (@{$data->{songs}}) {
       my $level_id = $song->{levelid} || "custom_level_".$song->{hash};
       next unless defined $level_id;
-      foreach my $difficulty_data (@{$song->{difficulties}}) {
-        my $gameMode = $difficulty_data->{characteristic} || "Standard";
-        my $difficulty = $difficulty_data->{name};
-        delete $beatmaps->{$level_id}{$gameMode}{$difficulty};
+      my $difficulties = $song->{difficulties};
+      if (@$difficulties) {
+        foreach my $difficulty_data (@{$song->{difficulties}}) {
+          my $gameMode = $difficulty_data->{characteristic} || "Standard";
+          my $difficulty = $difficulty_data->{name};
+          delete $beatmaps->{$level_id}{$gameMode}{$difficulty};
+        }
+      } else {
+        delete $beatmaps->{$level_id};
       }
     }
   }
@@ -917,7 +933,59 @@ sub buildPlaylists {
     }
   }
 
+  do {
+    opendir(my $dh, $PlayListFolder);
+
+    my $counter;
+
+    while (my $name = readdir $dh) {
+      next unless ($name =~ m/^to-improve-.*\.bplist$/);
+      my $playlist_file = catfile($PlayListFolder, $name);
+      my $stat = stat($playlist_file);
+      next unless -f $stat;
+      say "Reading songs to improve from $playlist_file";
+      my $playlist = decode_json(read_file($playlist_file));
+      my $age = ($Now - $stat->mtime) / $SecondsPerDay;
+      foreach my $song (@{$playlist->{songs}}) {
+        my $level_id = "custom_level_" . $song->{hash};
+        next unless exists $beatmaps->{$level_id};
+        foreach my $difficulty_data (@{$song->{difficulties}}) {
+          my $game_mode = $difficulty_data->{characteristic} || "Standard";
+          my $difficulty = $difficulty_data->{name};
+          next unless exists $beatmaps->{$level_id}{$game_mode}{$difficulty};
+          $beatmaps->{$level_id}{$game_mode}{$difficulty}{to_improve} = $age;
+          $counter++;
+        }
+      }
+    }
+
+    say "$counter songs to improve" if $counter;
+
+    closedir $dh;
+  };
+
   my ($total_hand_speed, $total_hit_speed, $hand_speed_count);
+
+  my $recently_played;
+
+  foreach my $level_id (keys %{$beatmaps}) {
+    my $song_id = $level_id;
+    while (exists $SameSongs->{$song_id}) {
+      $song_id = $SameSongs->{$song_id};
+    }
+    foreach my $game_mode (keys %{$beatmaps->{$level_id}}) {
+      foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
+        my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
+        my $age = ($Now - ($beatmap->{last_played})) / $SecondsPerDay;
+
+        if ($age < 1.0) {
+          $recently_played->{$song_id} = 1;
+        }
+
+        $beatmap->{age} = $age;
+      }
+    }
+  }
 
 
   foreach my $level_id (keys %{$beatmaps}) {
@@ -925,6 +993,7 @@ sub buildPlaylists {
     while (exists $SameSongs->{$song_id}) {
       $song_id = $SameSongs->{$song_id};
     }
+    next if exists $recently_played->{$song_id};
     foreach my $game_mode (keys %{$beatmaps->{$level_id}}) {
       foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
         my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
@@ -948,12 +1017,7 @@ sub buildPlaylists {
           next;
         }
 
-        my $age = ($Now - ($beatmap->{last_played})) / $SecondsPerDay;
-        next if $age < 1.0;
-
-        $beatmap->{age} = $age;
-
-        next if $beatmap->{predicted_score} < 0.6;
+        #next if $beatmap->{predicted_score} < $MinimumScoreForWorkout;
 
         push @{$songs->{$song_id}}, $beatmap;
       }
@@ -983,19 +1047,33 @@ sub buildPlaylists {
     }
 
     foreach my $beatmap (@{$beatmaps}) {
-      #my $weight = 1 - $beatmap->{predicted_score};
-      #$weight += 1 - $beatmap->{average_score};
-      my $weight = $beatmap->{predicted_score} - $beatmap->{average_score};
+      my $weight = 0;
+      $weight += 1 - $beatmap->{average_score};
+      $weight += 1 - $beatmap->{predicted_score};
+      # TODO improve prediction accuracy somehow, someway
+      # TODO prefer maps where predicted >> average score
+      #my $expected_improvement = $beatmap->{predicted_score} - $beatmap->{average_score};
+      #if ($expected_improvement > 0.05) {
+      #  $weight += 0.5;
+      #}
+      #if ($beatmap->{predicted_score} > $beatmap->{average_score}) {
+      #  $weight += $beatmap->{predicted_score} - $beatmap->{average_score};
+      #}
       my $speed_weight;
       if (defined $beatmap->{average_hand_speed}) {
         $speed_weight = $beatmap->{average_hand_speed} / $max_hand_speed;
         $speed_weight += $beatmap->{average_hit_speed} / $max_hit_speed;
       } else {
         # TODO attempt to predict hand speed?
+        # probably proportional to average change in position over time.
         $speed_weight = $average_speed_weight;
       }
       $beatmap->{speed_weight} = $speed_weight;
       $weight += $speed_weight;
+
+      if (exists $beatmap->{to_improve} && $beatmap->{to_improve} < $beatmap->{age}) {
+        $weight += $beatmap->{age};
+      }
 
       next unless $weight > $max_weight;
       $victim = $beatmap;
@@ -1026,7 +1104,7 @@ sub buildPlaylists {
 
   if (@{$unplayed}) {
     my $candidate = $unplayed->[0];
-    if ($candidate->{predicted_score} > 0.6) {
+    if ($candidate->{predicted_score} > $MinimumScoreForWorkout) {
       shift @{$unplayed};
       $total_time += $candidate->{duration} + 30;
       my $song_id = $candidate->{song_id};
