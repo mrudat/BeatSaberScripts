@@ -939,11 +939,14 @@ sub buildPlaylists {
     my $counter;
 
     while (my $name = readdir $dh) {
-      next unless ($name =~ m/^to-improve-.*\.bplist$/);
+      next unless ($name =~ m/^(to-improve|not-played)-.*\.bplist$/);
+      my $improve_or_not = $1;
+      my $msg = $improve_or_not eq "to-improve" ? "to improve" : "not played yet";
+      my $key = $improve_or_not eq "to-improve" ? "to_improve" : "not_played";
       my $playlist_file = catfile($PlayListFolder, $name);
       my $stat = stat($playlist_file);
       next unless -f $stat;
-      say "Reading songs to improve from $playlist_file";
+      say "Reading songs $msg from $playlist_file";
       my $playlist = decode_json(read_file($playlist_file));
       my $age = ($Now - $stat->mtime) / $SecondsPerDay;
       foreach my $song (@{$playlist->{songs}}) {
@@ -953,13 +956,15 @@ sub buildPlaylists {
           my $game_mode = $difficulty_data->{characteristic} || "Standard";
           my $difficulty = $difficulty_data->{name};
           next unless exists $beatmaps->{$level_id}{$game_mode}{$difficulty};
-          $beatmaps->{$level_id}{$game_mode}{$difficulty}{to_improve} = $age;
-          $counter++;
+          $beatmaps->{$level_id}{$game_mode}{$difficulty}{$key} = $age;
+          $counter->{$msg}++;
         }
       }
     }
 
-    say "$counter songs to improve" if $counter;
+    foreach my $msg (keys %{$counter}) {
+      say $counter->{$msg}, " songs ", $msg;
+    }
 
     closedir $dh;
   };
@@ -976,6 +981,8 @@ sub buildPlaylists {
     foreach my $game_mode (keys %{$beatmaps->{$level_id}}) {
       foreach my $difficulty (keys %{$beatmaps->{$level_id}{$game_mode}}) {
         my $beatmap = $beatmaps->{$level_id}{$game_mode}{$difficulty};
+        next unless exists $beatmap->{last_played};
+
         my $age = ($Now - ($beatmap->{last_played})) / $SecondsPerDay;
 
         if ($age < 1.0) {
@@ -983,10 +990,13 @@ sub buildPlaylists {
         }
 
         $beatmap->{age} = $age;
+
+        foreach my $key (qw(to_improve not_played)) {
+          delete $beatmap->{$key} if exists $beatmap->{$key} && exists $beatmap->{$key} > $age;
+        }
       }
     }
   }
-
 
   foreach my $level_id (keys %{$beatmaps}) {
     my $song_id = $level_id;
@@ -1017,6 +1027,10 @@ sub buildPlaylists {
           next;
         }
 
+        if (exists $beatmap->{to_improve} || exists $beatmap->{not_played}) {
+          # I limit suggestions to a predicted store of 75% or more.
+          $beatmap->{predicted_score} = 0.75 if $beatmap->{predicted_score} < 0.75;
+        }
         #next if $beatmap->{predicted_score} < $MinimumScoreForWorkout;
 
         push @{$songs->{$song_id}}, $beatmap;
@@ -1071,7 +1085,11 @@ sub buildPlaylists {
       $beatmap->{speed_weight} = $speed_weight;
       $weight += $speed_weight;
 
-      if (exists $beatmap->{to_improve} && $beatmap->{to_improve} < $beatmap->{age}) {
+      if (exists $beatmap->{to_improve}) {
+        $weight += $beatmap->{age};
+      }
+
+      if (exists $beatmap->{not_played}) {
         $weight += $beatmap->{age};
       }
 
