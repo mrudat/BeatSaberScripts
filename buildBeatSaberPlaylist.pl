@@ -5,26 +5,31 @@ use strict;
 
 use v5.16;
 
-use JSON qw(decode_json);
+#can't use JSON, because it breaks when you fork()!
+use Cpanel::JSON::XS qw(decode_json);
 use File::Find;
 use POSIX qw(strftime);
 use File::Spec::Functions qw(catdir catfile updir rel2abs);
 use File::stat;
-use Storable;
+use Storable qw(store retrieve dclone);
 use Statistics::Regression;
 use Cwd qw(abs_path);
 use File::Slurp;
 use File::Path qw(make_path);
+use English qw(-no_match_vars);
 
 use autodie qw(:all);
 
 my $DEFAULT_NOTE_JUMP_SPEED = 10;
 
-my $DataDir = catdir(abs_path(__FILE__), updir(), "data");
+my $BinDir = catdir(abs_path(__FILE__), updir());
+
+my $DataDir = catdir($BinDir, "data");
 
 my $CacheDir = catdir($DataDir, "cache");
 
 my $BeatSaberFolder = "G:\\Steam\\steamapps\\common\\Beat Saber";
+my $BeatSaberFolders = "G:\\Modding\\Beat Saber";
 
 my $PlayListFolder = catdir($BeatSaberFolder, "Playlists");
 
@@ -70,6 +75,7 @@ my $VanillaMapBPM = {
   "OneHope" => 145,
   "AngelVoices" => 166,
   "FitBeat" => 215,
+  #"SpookyBeat" => ???,
 
   "Crystallized" => 174,
   "CycleHit" => 175,
@@ -104,6 +110,45 @@ my $VanillaMapBPM = {
   "Thunder" => 168,
   "Warriors" => 156,
   "WhateverItTakes" => 135,
+
+  "CountingStars" => 122,
+  "DNA" => 140,
+  "DontCha" => 120,
+  "PartyRockAnthem" => 130,
+  "Rollin" => 98,
+  "Sugar" => 120,
+  "TheSweetEscape" => 120,
+
+  "Bangarang" => 110,
+  "Butterflies" => 128,
+  "DontGo" => 150,
+  "FirstOfTheYear" => 145,
+  "RaggaBomb" => 174,
+  "RockNRoll" => 128,
+  "ScaryMonstersAndNiceSprites" => 140,
+  "TheDevilsDen" => 128,
+
+  "AllTheGoodGirlsGoToHell" => 92.5,
+  "BadGuy" => 135,
+  "Bellyache" => 100,
+  "BuryAFriend" => 120,
+  "HappierThanEver" => 162,
+  "IDidntChangeMyNumber" => 142,
+  "NDA" => 170,
+  "Oxytocin" => 125,
+  "ThereforeIAm" => 94,
+  "YouShouldSeeMeInACrown" => 150,
+
+  "Alejandro" => 99,
+  "BadRomance" => 119,
+  "BornThisWay" => 124,
+  "JustDance" => 119,
+  "Paparazzi" => 115,
+  "PokerFace" => 119,
+  "RainOnMe" => 123,
+  "StupidLove" => 118,
+  "Telephone" => 112,
+  "TheEdgeOfGlory" => 128,
 };
 
 # TODO actually parse the file format?
@@ -127,7 +172,7 @@ my ($IgnoredGameModes) = {
 };
 
 do {
-  my $json = JSON->new->pretty->canonical;
+  my $json = Cpanel::JSON::XS->new->pretty->canonical;
 
   sub encodeJson { return $json->encode(@_); }
 };
@@ -232,9 +277,9 @@ sub loadOSTOrDLCBeatMap {
           $beatmap = decode_json($line);
         };
 
-        if ($@) {
-          say $temp;
-          warn $@;
+        if ($EVAL_ERROR) {
+          say $line;
+          warn $EVAL_ERROR;
           next;
         }
 
@@ -272,7 +317,7 @@ sub loadOSTOrDLCBeatMap {
 
       close $in;
     };
-    store $cache, $cache_path;
+    store $cache, $cache_path if $cache;
   }
 }
 
@@ -283,7 +328,17 @@ sub loadCustomBeatMaps {
 
   die "$song_hash_file not found, is SongCore installed?" unless -f $song_hash_file;
 
-  my $song_hash_data = decode_json(read_file($song_hash_file));
+  my $song_hash_data;
+
+  my $temp = read_file($song_hash_file);
+
+  eval {
+    $song_hash_data = decode_json($temp);
+  };
+  if ($EVAL_ERROR) {
+    say $temp;
+    die $EVAL_ERROR;
+  }
 
   foreach my $song_dir (keys %{$song_hash_data}) {
     next unless -d $song_dir;
@@ -295,7 +350,16 @@ sub loadCustomBeatMaps {
     my $songHash = $song_hash_data->{$song_dir}{songHash};
     my $level_id = "custom_level_$songHash";
 
-    my $song_data = decode_json(read_file($song_info_path));
+    my $info = read_file($song_info_path);
+    my $song_data;
+    eval {
+      $song_data = decode_json($info);
+    };
+    if ($EVAL_ERROR) {
+      say $info;
+      warn $EVAL_ERROR;
+      next;
+    }
 
     foreach my $game_mode_data (@{$song_data->{_difficultyBeatmapSets}}) {
       my $game_mode = $game_mode_data->{_beatmapCharacteristicName};
@@ -385,10 +449,22 @@ my $difficulties = [qw(
   ExpertPlus
 )];
 
-sub loadSongPlayHistoryData {
-  my ($beatmaps) = @_;
+sub saveSongPlayHistoryData {
+  my ($beatsaberFolder, $merged) = @_;
 
-  my $song_play_file = catfile($BeatSaberFolder, "UserData", "SongPlayData.json");
+  my $songPlayFile = catfile($beatsaberFolder, "UserData", "SongPlayData.json");
+
+  return unless -f $songPlayFile;
+
+  open my $fh, ">", $songPlayFile;
+  $fh->print(encodeJson $merged);
+  close $fh;
+}
+
+sub loadSongPlayHistoryData2 {
+  my ($beatsaber_folder, $merged) = @_;
+
+  my $song_play_file = catfile($beatsaber_folder, "UserData", "SongPlayData.json");
 
   return unless -f $song_play_file;
 
@@ -397,6 +473,45 @@ sub loadSongPlayHistoryData {
   my $song_play_data = decode_json(read_file($song_play_file));
 
   foreach my $key (keys %{$song_play_data}) {
+    my $data = $song_play_data->{$key};
+    foreach my $play (@{$data}) {
+      # don't mutate Date into a string.
+      my $date = $play->{"Date"};
+      $merged->{$key}{$date} = $play;
+    }
+  }
+}
+
+sub loadSongPlayHistoryData {
+  my ($beatmaps) = @_;
+
+  my ($merged) = {};
+
+  loadSongPlayHistoryData2($BeatSaberFolder, $merged);
+
+  my $victims;
+
+  opendir(my $dh, $BeatSaberFolders);
+  while (my $file = readdir $dh) {
+    next if $file =~ m/^\./;
+    my $path = catdir($BeatSaberFolders, $file, 'Beat Saber');
+    push @$victims, $path;
+    loadSongPlayHistoryData2($path, $merged);
+  }
+  closedir $dh;
+
+  foreach my $key (keys %{$merged}) {
+    my $data = $merged->{$key};
+    my $temp;
+    foreach my $date (sort keys %{$data}) {
+      push @{$temp}, $data->{$date};
+    }
+    $merged->{$key} = $temp;
+  }
+
+  saveSongPlayHistoryData($BeatSaberFolder, $merged);
+
+  foreach my $key (keys %{$merged}) {
     next unless ($key =~ m/^(\S+)___(\d)___(\S+)$/);
     my ($level_id, $difficulty, $game_mode) = ($1, $2, $3) ;
 
@@ -419,7 +534,7 @@ sub loadSongPlayHistoryData {
 
     my $scoreFactor = 1.0 / $maxScore;
 
-    my $plays = $song_play_data->{$key};
+    my $plays = $merged->{$key};
 
     my $last_played = 0;
 
@@ -778,10 +893,11 @@ sub calculateBeatmapStats {
         my $combo = 0;
         my $note_count = $#{$notes} + 1;
         my $max_score = (($note_count - 13) * 8 * 115) + 5611;
+        $beatmap->{max_score} = $max_score;
 
         my $seconds_per_beat = $beatmap->{seconds_per_beat};
         next unless defined $seconds_per_beat;
-        my $notes_with_stats;
+        my $notes_with_stats = 0;
 
         foreach my $note (@{$notes}) {
           my $saber = $note->{_type};
@@ -839,13 +955,16 @@ sub calculateBeatmapStats {
         $total_scores += $weight * ($total_score / $max_score);
         $total_weight += $weight;
 
-        $beatmap->{predicted_score} = $total_scores / $total_weight;
+        my $predictedScore = 0;
+        $predictedScore = $total_scores / $total_weight if $total_weight > 0;
+
+        $beatmap->{predicted_score} = $predictedScore;
       }
     }
   }
 }
 
-my $OptionalPlaylistKeys = [qw(average_score speed_weight songName songAuthorName levelAuthorName percentage_predicted_notes)];
+my $OptionalPlaylistKeys = [qw(average_score speed_weight songName songAuthorName levelAuthorName percentage_predicted_notes potentialScore)];
 
 sub writePlaylist {
   my ($beatmaps, $file_name, $title) = @_;
@@ -854,7 +973,7 @@ sub writePlaylist {
 
   foreach my $beatmap (@{$beatmaps}) {
     my $playlist_entry = {
-      levelID => $beatmap->{level_id},
+      levelid => $beatmap->{level_id},
       difficulties => [
         {
           characteristic => $beatmap->{game_mode},
@@ -939,31 +1058,83 @@ sub buildPlaylists {
     my $counter;
 
     while (my $name = readdir $dh) {
-      next unless ($name =~ m/^(to-improve|not-played)-.*\.bplist$/);
-      my $improve_or_not = $1;
-      my $msg = $improve_or_not eq "to-improve" ? "to improve" : "not played yet";
-      my $key = $improve_or_not eq "to-improve" ? "to_improve" : "not_played";
-      my $playlist_file = catfile($PlayListFolder, $name);
-      my $stat = stat($playlist_file);
-      next unless -f $stat;
-      say "Reading songs $msg from $playlist_file";
-      my $playlist = decode_json(read_file($playlist_file));
-      my $age = ($Now - $stat->mtime) / $SecondsPerDay;
-      foreach my $song (@{$playlist->{songs}}) {
-        my $level_id = "custom_level_" . $song->{hash};
-        next unless exists $beatmaps->{$level_id};
-        foreach my $difficulty_data (@{$song->{difficulties}}) {
-          my $game_mode = $difficulty_data->{characteristic} || "Standard";
-          my $difficulty = $difficulty_data->{name};
-          next unless exists $beatmaps->{$level_id}{$game_mode}{$difficulty};
-          $beatmaps->{$level_id}{$game_mode}{$difficulty}{$key} = $age;
-          $counter->{$msg}++;
+      if ($name =~ m/^(to-improve|not-played).*\.bplist$/) {
+        my $improve_or_not = $1;
+        my $msg = $improve_or_not eq "to-improve" ? "to improve" : "not played yet";
+        my $key = $improve_or_not eq "to-improve" ? "to_improve" : "not_played";
+        my $playlist_file = catfile($PlayListFolder, $name);
+        my $stat = stat($playlist_file);
+        next unless -f $stat;
+        say "Reading songs $msg from $playlist_file";
+        my $playlist = decode_json(read_file($playlist_file));
+        my $age = ($Now - $stat->mtime) / $SecondsPerDay;
+        foreach my $song (@{$playlist->{songs}}) {
+          my $level_id = "custom_level_" . $song->{hash};
+          next unless exists $beatmaps->{$level_id};
+          foreach my $difficulty_data (@{$song->{difficulties}}) {
+            my $game_mode = $difficulty_data->{characteristic} || "Standard";
+            my $difficulty = $difficulty_data->{name};
+            next unless exists $beatmaps->{$level_id}{$game_mode}{$difficulty};
+            my $data = $beatmaps->{$level_id}{$game_mode}{$difficulty};
+            my $potentialScore = $song->{potentialScore};
+            my $oldPotentialScore = $data->{potentialScore};
+            if ($potentialScore) {
+              if ((not defined $oldPotentialScore) or ($oldPotentialScore < $potentialScore)) {
+                $data->{potentialScore} = $potentialScore;
+              }
+            }
+            my $oldAge = $data->{$key};
+            if ((not defined $oldAge) || $age > $oldAge) {
+              $data->{$key} = $age;
+            }
+            $counter->{$msg}{$key} = 1;
+          }
         }
+      } elsif ($name =~ m/^(to-improve|not-played)$/) {
+        my $improve_or_not = $1;
+        my $msg = $improve_or_not eq "to-improve" ? "to improve" : "not played yet";
+        my $key = $improve_or_not eq "to-improve" ? "to_improve" : "not_played";
+        my $playlistFolder = catfile($PlayListFolder, $name);
+        my $stat = stat($playlistFolder);
+        next unless $stat && -d $stat;
+        opendir(my $dh2, $playlistFolder);
+        while (my $name2 = readdir $dh2) {
+          next unless $name2 =~ m/.bplist$/;
+          my $playlist_file = catfile($PlayListFolder, $name, $name2);
+          my $stat = stat($playlist_file);
+          next unless $stat && -f $stat;
+          say "Reading songs $msg from $playlist_file";
+          my $playlist = decode_json(read_file($playlist_file));
+          my $age = ($Now - $stat->mtime) / $SecondsPerDay;
+          foreach my $song (@{$playlist->{songs}}) {
+            my $level_id = "custom_level_" . $song->{hash};
+            next unless exists $beatmaps->{$level_id};
+            foreach my $difficulty_data (@{$song->{difficulties}}) {
+              my $game_mode = $difficulty_data->{characteristic} || "Standard";
+              my $difficulty = $difficulty_data->{name};
+              next unless exists $beatmaps->{$level_id}{$game_mode}{$difficulty};
+              my $data = $beatmaps->{$level_id}{$game_mode}{$difficulty};
+              my $potentialScore = $song->{potentialScore};
+              my $oldPotentialScore = $data->{potentialScore};
+              if ($potentialScore) {
+                if ((not defined $oldPotentialScore) or ($oldPotentialScore < $potentialScore)) {
+                  $data->{potentialScore} = $potentialScore;
+                }
+              }
+              my $oldAge = $data->{$key};
+              if ((not defined $oldAge) || $age > $oldAge) {
+                $data->{$key} = $age;
+              }
+              $counter->{$msg}++;
+            }
+          }
+        }
+        closedir $dh2;
       }
     }
 
     foreach my $msg (keys %{$counter}) {
-      say $counter->{$msg}, " songs ", $msg;
+      say scalar keys %{$counter->{$msg}}, " songs ", $msg;
     }
 
     closedir $dh;
@@ -1028,10 +1199,18 @@ sub buildPlaylists {
         }
 
         if (exists $beatmap->{to_improve} || exists $beatmap->{not_played}) {
-          # I limit suggestions to a predicted store of 75% or more.
-          $beatmap->{predicted_score} = 0.75 if $beatmap->{predicted_score} < 0.75;
+          my $potentialScore = $beatmap->{potentialScore};
+          my $predictedScore = $beatmap->{predicted_score};
+          if ($potentialScore) {
+            $potentialScore /= $beatmap->{max_score};
+            $beatmap->{potentialScore} = $potentialScore;
+            $beatmap->{predicted_score} = $potentialScore if $potentialScore > $predictedScore;
+          } else {
+            # I limit suggestions to a predicted store of 75% or more.
+            $beatmap->{predicted_score} = 0.75 if $predictedScore < 0.75;
+          }
         }
-        #next if $beatmap->{predicted_score} < $MinimumScoreForWorkout;
+        next if $beatmap->{predicted_score} < $MinimumScoreForWorkout;
 
         push @{$songs->{$song_id}}, $beatmap;
       }
@@ -1178,8 +1357,15 @@ make_path $CacheDir;
 
 open STDOUT, ">", catfile($DataDir, "buildBeatSaberPlaylist.txt");
 open STDERR, ">&STDOUT";
+STDOUT->autoflush(1);
 
 say "Starting run at ", ts();
+
+my $buildBeatSaberPlaylist2Pid = fork();
+if ($buildBeatSaberPlaylist2Pid == 0) {
+  exec(catfile($BinDir, "buildBeatSaberPlaylist2.pl"));
+  exit 1;
+}
 
 my $beatmaps = loadAllBeatMaps();
 
@@ -1194,6 +1380,8 @@ say "Loaded play data at ", ts();
 calculateBloqStats($bloq_stats);
 
 calculateBeatmapStats($beatmaps, $bloq_stats);
+
+waitpid($buildBeatSaberPlaylist2Pid, 0);
 
 buildPlaylists($beatmaps);
 
