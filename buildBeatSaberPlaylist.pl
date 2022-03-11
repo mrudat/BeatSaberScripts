@@ -4,14 +4,13 @@ use warnings;
 use strict;
 
 use v5.16;
+use utf8;
 
 use JSON qw(decode_json);
 use File::Spec::Functions qw(catdir catfile updir rel2abs);
 use Cwd qw(abs_path);
 use LWP::RobotUA;
 use HTTP::Cache::Transparent;
-use DBD::SQLite;
-use DBI;
 use POSIX qw(ceil floor strftime);
 use File::Find;
 use File::Path qw(make_path);
@@ -33,6 +32,11 @@ my $PlayerID = '76561198001262880';
 
 my $NOW = time();
 
+my $SECONDS_PER_DAY = 24 * 60 * 60;
+my $SECONDS_IN_15_MINUTES = 15 * 60;
+my $SECONDS_IN_SIX_MONTHS = 6 * 30 * $SECONDS_PER_DAY;
+my $SECONDS_PER_WEEK = $SECONDS_PER_DAY * 7;
+
 my $DataDir = catdir(abs_path(__FILE__), updir(), "data");
 
 my $CacheDir = catdir($DataDir, "cache");
@@ -52,6 +56,7 @@ my ($SameSongs) = {
   "custom_level_45F9480A43DDEA9FF338BF449AD9EAD62F73EB52" => "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74",
   "custom_level_E6AF862558EF500F16D3B82161BBDFB1D2C296BF" => "custom_level_2C002D2874E029DB43F3C7CF9BB271AE0D769B74",
   "custom_level_A03CB0A107993BE5CDED1E91DC31E8A7B048F02A" => "custom_level_88A33C64E8FDE2A88D9A99799B9F58205C412B10",
+  "custom_level_D7D5BA5E60696538518DBF9428FAB4746290A9B1" => "custom_level_BC6C7EF1385DB4C11C59736D2B32EACF48C95BD9"
 };
 
 sub ts {
@@ -67,10 +72,6 @@ do {
 
   sub encodeJson { return $json->encode(@_); }
 };
-
-my $SECONDS_PER_DAY = 24 * 60 * 60;
-my $SECONDS_IN_15_MINUTES = 15 * 60;
-my $SECONDS_IN_SIX_MONTHS = 6 * 30 * $SECONDS_PER_DAY;
 
 HTTP::Cache::Transparent::init({
   BasePath => catdir($CacheDir, "http"),
@@ -322,30 +323,28 @@ sub fetchNeighbours {
       my $delta;
       my $scoreAdjust;
       foreach my $scoreDate (@{$scoreDates}) {
-        my $temp = abs($scoreDate->[0] - $timeSet);
+        my $temp = $scoreDate->[0] - ($timeSet + $SECONDS_PER_WEEK);
+        next unless $temp > 0;
+        # $timeSet should be at most a week after $scoreDate->[0]
         if ((not defined $delta) || ($temp < $delta)) {
           $delta = $temp;
           $scoreAdjust = $scoreDate->[1];
         };
       }
-
-      $delta -= $SECONDS_IN_SIX_MONTHS;
-      $delta = 0 if $delta > 0;
-      $delta /= -$SECONDS_IN_SIX_MONTHS;
-      # delta is now in the range 0 .. 1, with 0 being a difference of 6 months and a 1 being a difference of 0 seconds.
+      next unless defined $delta;
 
       my $leaderboardId = $leaderboard->{id};
 
       # TODO weight the average both on age of the score relative to the scores on the shared leaderboards and the number of shared leaderboards
 
       if (exists $LEADERBOARDS->{$leaderboardId}) {
-        $NEIGHBOUR_SCORE->{$leaderboardId}{total} += $delta * $score->{modifiedScore} * $scoreAdjust;
-        $NEIGHBOUR_SCORE->{$leaderboardId}{totalWeight} += $delta;
+        $NEIGHBOUR_SCORE->{$leaderboardId}{total} += $score->{modifiedScore} * $scoreAdjust;
+        $NEIGHBOUR_SCORE->{$leaderboardId}{totalWeight} += 1;
       } else {
         $NEW_SONGS->{$leaderboardId} = $leaderboard;
-        $NEW_SONGS_WEIGHT->{$leaderboardId} += $delta * $likedWeight;
-        $NEW_SONGS_NEIGHBOUR_SCORE->{$leaderboardId}{total} += $delta * $score->{modifiedScore} * $scoreAdjust;
-        $NEW_SONGS_NEIGHBOUR_SCORE->{$leaderboardId}{totalWeight} += $delta;
+        $NEW_SONGS_WEIGHT->{$leaderboardId} += $likedWeight;
+        $NEW_SONGS_NEIGHBOUR_SCORE->{$leaderboardId}{total} += $score->{modifiedScore} * $scoreAdjust;
+        $NEW_SONGS_NEIGHBOUR_SCORE->{$leaderboardId}{totalWeight} += 1;
       }
     }
   }
@@ -397,6 +396,7 @@ my $OptionalPlaylistKeys = [qw(
   potentialImprovement
   potentialScore
   potentialAccuracy
+  weight
 )];
 
 sub writePlaylist {
@@ -477,6 +477,12 @@ sub getSongInfo {
   return $songInfo;
 }
 
+sub accuracyWeight {
+  my ($accuracy) = @_;
+#  return 1 - abs($accuracy - 0.7);
+  return 1 - abs($accuracy - 0.8);
+}
+
 my $NEW_SONG_DATA;
 
 sub saveNewSongs {
@@ -488,6 +494,7 @@ sub saveNewSongs {
 
   foreach my $leaderboardId (sort { $NEW_SONGS_WEIGHT->{$b} <=> $NEW_SONGS_WEIGHT->{$a} } keys %{$NEW_SONGS_WEIGHT}) {
     my $data = $NEW_SONGS->{$leaderboardId};
+    my $newSongWeight = $NEW_SONGS_WEIGHT->{$leaderboardId} + 1;
     my $hash = uc $data->{songHash};
 
     my $gameMode = $data->{difficulty}{gameMode};
@@ -620,10 +627,15 @@ sub saveNewSongs {
     my $potentialScore = $data->{potentialScore};
     
     my $potentialAccuracy = $potentialScore / $maxScore;
-    # don't pick this if it is too hard
-    #next if $potentialAccuracy < 0.5;
+
+    #my $likeCount = 0;
+
+    #$likeCount++ if exists $FAVOURITES->{$levelId};
+
+    #my $likeWeight = ($likeCount + 1);
 
     $data->{potentialAccuracy} = $potentialAccuracy;
+    $data->{weight} = accuracyWeight($potentialAccuracy) * $newSongWeight;
 
     push @{$newSongs}, $data;
     push @{$NEW_SONG_DATA}, $data;
@@ -632,7 +644,9 @@ sub saveNewSongs {
 
   say "New Songs: " . ($#{$newSongs} + 1);
 
-  writePlaylist([sort { $b->{potentialAccuracy} <=> $a->{potentialAccuracy} } @{$newSongs}], "not-played.bplist", "Not Played");
+  writePlaylist([sort { $b->{weight} <=> $a->{weight} } @{$newSongs}], "not-played.bplist", "Not Played");
+
+  # TODO filter favourites, expected score ~= 0.7, write playlist.
 }
 
 sub saveSongsToImprove {
@@ -759,7 +773,7 @@ sub loadSongPlayHistoryData {
   }
 }
 
-my $targetDuration = 2.5 * 60;
+my $targetDuration = 3 * 60;
 
 sub durationWeight {
   my ($duration) = @_;
@@ -781,10 +795,10 @@ sub ageWeight {
   }
 
   my $age = ($NOW - $lastPlayed) / $SECONDS_PER_DAY;
-  $age = 14 if ($age > 14);
+  $age = 7 if ($age > 7);
   $age = 0 if ($age < 1);
 
-  return ($age / 14) ** 2;
+  return ($age / 7) ** 2;
 }
 
 sub saveWorkout {
@@ -795,34 +809,47 @@ sub saveWorkout {
 
     my $potentialAccuracy = $song->{potentialAccuracy};
 
-    my $potentialWeight = (1 - abs($potentialAccuracy - 0.7)) ** 2;
-
     my $likeCount = 0;
 
     $likeCount++ if exists $FAVOURITES->{$levelId};
 
     my $likeWeight = 1 + $likeCount;
 
-    $song->{weight} = $potentialWeight * $likeWeight * ageWeight($levelId) * durationWeight($song->{duration});
+    my $rankedWeight = 1 + $song->{ranked};
+
+    $song->{weight} = accuracyWeight($potentialAccuracy) * $likeWeight * ageWeight($levelId) * durationWeight($song->{duration}) * $rankedWeight;
   }
 
   my $workout;
-  my $workoutDuration;
-  my $selectedLevels;
+  my $workoutDuration = 0;
+  my $selectedLevels = {};
 
-  do {
-    my $victim = (sort {$b->{weight} <=> $a->{weight}} @{$NEW_SONG_DATA})[0];
+  # pick 40 minutes of songs.
+  my $targetWorkoutDuration = 40 * 60;
+
+  NEW_SONG: foreach my $victim (sort {$b->{weight} <=> $a->{weight}} grep {defined $_->{weight}} values @{$NEW_SONG_DATA}) {
+    my $levelId = $victim->{levelId};
+    do {
+      my $songId = $levelId;
+      next NEW_SONG if exists $selectedLevels->{$songId};
+      while (exists $SameSongs->{$songId}) {
+        $songId = $SameSongs->{$songId};
+        next NEW_SONG if exists $selectedLevels->{$songId};
+      }
+    };
 
     push @{$workout}, $victim;
-    $workoutDuration = $victim->{duration};
-    my $songId = $victim->{levelId};
+    $workoutDuration += $victim->{duration};
+
+    last if $workoutDuration >= $targetWorkoutDuration / 4;
+
+    my $songId = $levelId;
     $selectedLevels->{$songId} = 1;
     while (exists $SameSongs->{$songId}) {
       $songId = $SameSongs->{$songId};
       $selectedLevels->{$songId} = 1;
     }
-  };
-
+  }
 
   my $totalWeight = 0;
 
@@ -872,8 +899,6 @@ sub saveWorkout {
 
     $data->{potentialAccuracy} = $potentialAccuracy;
 
-    my $potentialWeight = (1 - abs($potentialAccuracy - 0.7)) ** 2;
-
     # TODO get votes?
     my $likeCount = 0;
 
@@ -889,9 +914,10 @@ sub saveWorkout {
 
     my $averageScore = $AVERAGE_SCORE->{$levelId}{$difficulty}{$gameMode};
     my $averageAccuracy = $averageScore / $maxScore;
-    my $averageAccuracyWeight = (1 - abs($averageAccuracy - 0.7)) ** 2;
+
+    my $rankedWeight = 1 + $data->{ranked};
     
-    my $weight = $averageAccuracyWeight * $potentialWeight * $improvementWeight * $likeWeight * ageWeight($levelId) * durationWeight($duration);
+    my $weight = accuracyWeight($averageAccuracy) * accuracyWeight($potentialAccuracy) * $improvementWeight * $likeWeight * ageWeight($levelId) * durationWeight($duration) * $rankedWeight;
     
     $data->{weight} = $weight;
     $totalWeight += $weight;
@@ -899,19 +925,23 @@ sub saveWorkout {
 
   # TODO what about songs for which we have no predicted score?
 
-  # pick 40 minutes of songs.
-  my $targetWorkoutDuration = 40 * 60;
-
-  foreach my $victim (sort {$b->{weight} <=> $a->{weight}} grep {defined $_->{weight}} values %{$OLD_SONGS}) {
+  OLD_SONG: foreach my $victim (sort {$b->{weight} <=> $a->{weight}} grep {defined $_->{weight}} values %{$OLD_SONGS}) {
     my $levelId = $victim->{levelId};
-    next if exists $selectedLevels->{$levelId};
+    do {
+      my $songId = $levelId;
+      next OLD_SONG if exists $selectedLevels->{$songId};
+      while (exists $SameSongs->{$songId}) {
+        $songId = $SameSongs->{$songId};
+        next OLD_SONG if exists $selectedLevels->{$songId};
+      }
+    };
 
     push @{$workout}, $victim;
     $workoutDuration += $victim->{duration};
 
     last if $workoutDuration >= $targetWorkoutDuration;
 
-    my $songId = $victim->{levelId};
+    my $songId = $levelId;
     $selectedLevels->{$songId} = 1;
     while (exists $SameSongs->{$songId}) {
       $songId = $SameSongs->{$songId};
@@ -932,7 +962,7 @@ make_path $DataDir;
 
 make_path $CacheDir;
 
-open STDOUT, ">", catfile($DataDir, "buildBeatSaberPlaylist2.txt");
+open STDOUT, ">", catfile($DataDir, "buildBeatSaberPlaylist.txt");
 open STDERR, ">&STDOUT";
 STDOUT->autoflush(1);
 
