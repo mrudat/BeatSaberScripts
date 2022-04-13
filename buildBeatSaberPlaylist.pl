@@ -67,6 +67,11 @@ sub ts2 {
   return strftime("%Y-%m-%dT%H%M%S", localtime());
 }
 
+sub format_ts {
+  my ($time) = @_;
+  return strftime("%Y-%m-%dT%H:%M:%S", localtime($time));
+}
+
 do {
   my $json = JSON->new->pretty->canonical;
 
@@ -324,8 +329,8 @@ sub fetchNeighbours {
       my $scoreAdjust;
       foreach my $scoreDate (@{$scoreDates}) {
         my $temp = $scoreDate->[0] - ($timeSet + $SECONDS_PER_WEEK);
-        next unless $temp > 0;
-        # $timeSet should be at most a week after $scoreDate->[0]
+        next unless $temp <= 0;
+        $temp = abs($temp);
         if ((not defined $delta) || ($temp < $delta)) {
           $delta = $temp;
           $scoreAdjust = $scoreDate->[1];
@@ -777,6 +782,7 @@ my $targetDuration = 3 * 60;
 
 sub durationWeight {
   my ($duration) = @_;
+  return 0 unless defined $duration;
 
   my $weight = 1 - (abs($duration - $targetDuration) / $targetDuration);
   return 0.01 if $weight < 0;
@@ -829,21 +835,19 @@ sub saveWorkout {
 
   NEW_SONG: foreach my $victim (sort {$b->{weight} <=> $a->{weight}} grep {defined $_->{weight}} values @{$NEW_SONG_DATA}) {
     my $levelId = $victim->{levelId};
-    do {
-      my $songId = $levelId;
+    my $songId = $levelId;
+    next NEW_SONG if exists $selectedLevels->{$songId};
+    while (exists $SameSongs->{$songId}) {
+      $songId = $SameSongs->{$songId};
       next NEW_SONG if exists $selectedLevels->{$songId};
-      while (exists $SameSongs->{$songId}) {
-        $songId = $SameSongs->{$songId};
-        next NEW_SONG if exists $selectedLevels->{$songId};
-      }
-    };
+    }
 
     push @{$workout}, $victim;
     $workoutDuration += $victim->{duration};
 
     last if $workoutDuration >= $targetWorkoutDuration / 4;
 
-    my $songId = $levelId;
+    $songId = $levelId;
     $selectedLevels->{$songId} = 1;
     while (exists $SameSongs->{$songId}) {
       $songId = $SameSongs->{$songId};
@@ -913,6 +917,7 @@ sub saveWorkout {
     }
 
     my $averageScore = $AVERAGE_SCORE->{$levelId}{$difficulty}{$gameMode};
+    next unless defined $averageScore && defined $maxScore;
     my $averageAccuracy = $averageScore / $maxScore;
 
     my $rankedWeight = 1 + $data->{ranked};
@@ -927,21 +932,19 @@ sub saveWorkout {
 
   OLD_SONG: foreach my $victim (sort {$b->{weight} <=> $a->{weight}} grep {defined $_->{weight}} values %{$OLD_SONGS}) {
     my $levelId = $victim->{levelId};
-    do {
-      my $songId = $levelId;
+    my $songId = $levelId;
+    next OLD_SONG if exists $selectedLevels->{$songId};
+    while (exists $SameSongs->{$songId}) {
+      $songId = $SameSongs->{$songId};
       next OLD_SONG if exists $selectedLevels->{$songId};
-      while (exists $SameSongs->{$songId}) {
-        $songId = $SameSongs->{$songId};
-        next OLD_SONG if exists $selectedLevels->{$songId};
-      }
-    };
+    }
 
     push @{$workout}, $victim;
     $workoutDuration += $victim->{duration};
 
     last if $workoutDuration >= $targetWorkoutDuration;
 
-    my $songId = $levelId;
+    $songId = $levelId;
     $selectedLevels->{$songId} = 1;
     while (exists $SameSongs->{$songId}) {
       $songId = $SameSongs->{$songId};
