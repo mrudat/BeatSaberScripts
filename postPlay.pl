@@ -695,6 +695,11 @@ group by SongHash,
          GameMode,
          Difficulty
 ),
+favouriteSongs as (
+SELECT substr(LevelId,14) as SongHash
+  FROM FavouriteLevels
+ where LevelId like 'custom_level_%'
+),
 combined as (
    select Q1.SongHash,
           Q1.Difficulty,
@@ -703,7 +708,8 @@ combined as (
           Q1.AverageAccuracy as theirAccuracy,
           Q2.Age,
           Q3.SaberSpeed,
-          Q3.HandSpeed
+          Q3.HandSpeed,
+          CASE WHEN Q4.SongHash is not NULL THEN 1 ELSE 0 END as IsFavorite 
      from filteredTheirAverageAccuracy Q1
 left join myAccuracy Q2
        on Q1.SongHash = Q2.SongHash
@@ -713,6 +719,8 @@ left join beatSaviourStats Q3
        on Q1.SongHash = Q3.SongHash
       and Q1.Difficulty = Q3.Difficulty
       and Q1.GameMode = Q3.GameMode
+left join favouriteSongs Q4
+       on Q1.SongHash = Q4.SongHash
 ),
 calculations as (
 select SongHash,
@@ -726,7 +734,8 @@ select SongHash,
        theirAccuracy as PotentialScore,
        Age,
        HandSpeed / SaberSpeed as WristFactor,
-       HandSpeed
+       HandSpeed,
+       IsFavorite
   from combined
  where (Age is NULL or AGE > 1)
 ),
@@ -747,7 +756,8 @@ select avg(WristFactor) as AverageWristFactor,
          WristFactor,
          percent_rank() over (order by COALESCE(WristFactor, AverageWristFactor) asc) as WristFactorRank,
          HandSpeed,
-         percent_rank() over (order by COALESCE(HandSpeed, AverageHandSpeed) asc) as HandSpeedRank
+         percent_rank() over (order by COALESCE(HandSpeed, AverageHandSpeed) asc) as HandSpeedRank,
+         IsFavorite
     from calculations,
          averages
 order by (ImprovementRank + 0.01)
@@ -755,11 +765,11 @@ order by (ImprovementRank + 0.01)
        * (AgeRank + 0.01)
        * (WristFactorRank + 0.01)
        * (HandSpeedRank + 0.01)
+       * (IsFavorite + 1)
          desc
 EOF
 
 # TODO weight by:
-# * if we liked the song
 # * how long the song is
 
 sub writeWorkout {
