@@ -22,8 +22,13 @@ use Archive::Zip;
 use Date::Parse;
 use Statistics::Regression;
 use Time::HiRes qw(time sleep);
+use File::stat;
+
+use Carp;
 
 use autodie qw(:all);
+
+$Carp::Verbose = 1;
 
 my $DEBUG = 0;
 $DEBUG = 1 if @ARGV;
@@ -42,13 +47,16 @@ my $DataDir = catdir(abs_path(__FILE__), updir(), "data");
 my $CacheDir = catdir($DataDir, "cache");
 
 my $BeatSaberFolder = "G:\\Steam\\steamapps\\common\\Beat Saber";
-my $BeatSaberFolders = "G:\\Modding\\Beat Saber";
+my $BSLegacyLauncherFolder = "G:\\Modding\\Beat Saber\\BSLegacyLauncher";
+my $BeatSaberFolders = catdir($BSLegacyLauncherFolder, "Installed Versions");
 
 my $BeatSaberAppdataFolder = catdir($ENV{localappdata},updir(),"LocalLow","Hyperbolic Magnetism","Beat Saber");
 
-my $PlaylistFolder = catdir($BeatSaberFolder, "Playlists");
+my $BeatSaviorDataAppdataFolder = catdir($ENV{localappdata},updir(),"Roaming","Beat Savior Data");
 
-my $SongsFolder = catdir($BeatSaberFolder, "Beat Saber_Data", "CustomLevels");
+my $PlaylistFolder = catdir($BSLegacyLauncherFolder, "Playlists");
+
+my $SongsFolder = catdir($BSLegacyLauncherFolder, "CustomLevels");
 
 # TODO figure out a better way than this.
 my ($SameSongs) = {
@@ -73,7 +81,7 @@ sub format_ts {
 }
 
 do {
-  my $json = JSON->new->pretty->canonical;
+  my $json = JSON->new->utf8->pretty->canonical;
 
   sub encodeJson { return $json->encode(@_); }
 };
@@ -535,7 +543,8 @@ sub saveNewSongs {
     }
 
     if (not defined $noteCount) {
-      next if $downloaded >= 10;
+      #next if $downloaded >= 10;
+      next if 1;
       my $res;
       eval {
         $res = get("https://api.beatsaver.com/maps/hash/$hash");
@@ -671,7 +680,7 @@ my $LAST_PLAYED;
 my $AVERAGE_SCORE;
 
 sub saveSongPlayHistoryData {
-  my ($beatsaberFolder, $merged) = @_;
+  my ($beatsaberFolder, $merged, $victims) = @_;
 
   my $songPlayFile = catfile($beatsaberFolder, "UserData", "SongPlayData.json");
 
@@ -703,6 +712,47 @@ sub loadSongPlayHistoryData2 {
   }
 }
 
+sub loadBeatSaviorData {
+  my ($beatSaviourFile, $merged) = @_;
+
+  my $st = stat($beatSaviourFile);
+
+  return unless -f $st;
+
+  say "Reading plays from $beatSaviourFile at ", ts();
+
+  my $endTime = $st->mtime;
+
+  open my $in, "<", $beatSaviourFile;
+
+  my $header = <$in>;
+
+  my $age = ($NOW - $endTime);
+  my $weight = 1 / $age;
+
+  while (my $json = <$in>) {
+    my $data = decode_json($json);
+
+    my $levelId = "custom_level_" .$data->{"songID"};
+
+    if ($endTime > ($LAST_PLAYED->{$levelId} // 0)) {
+      $LAST_PLAYED->{$levelId} = $endTime;
+    };
+
+    my $difficulty = $difficultyMap->{$data->{"songDifficultyRank"}};
+    my $gameMode = $data->{"gameMode"} || "Standard";
+    my $rawScore = $data->{"trackers"}{"scoreTracker"}{"rawScore"};
+
+    $merged->{$levelId}{$difficulty}{$gameMode}{"totalScore"} += $rawScore * $weight;
+    $merged->{$levelId}{$difficulty}{$gameMode}{"totalWeight"} += $weight;
+
+    $merged->{$levelId}{$difficulty}{$gameMode}{"totalHandDistance"} += ($data->{"trackers"}{"distanceTracker"}{"leftHand"} + $data->{"trackers"}{"distanceTracker"}{"rightHand"}) * $weight;
+    $merged->{$levelId}{$difficulty}{$gameMode}{"totalSaberDistance"} += ($data->{"trackers"}{"distanceTracker"}{"leftSaber"} + $data->{"trackers"}{"distanceTracker"}{"rightSaber"}) * $weight;
+  }
+
+  close $in;
+}
+
 sub loadSongPlayHistoryData {
   my ($merged) = {};
 
@@ -713,7 +763,7 @@ sub loadSongPlayHistoryData {
   opendir(my $dh, $BeatSaberFolders);
   while (my $file = readdir $dh) {
     next if $file =~ m/^\./;
-    my $path = catdir($BeatSaberFolders, $file, 'Beat Saber');
+    my $path = catdir($BeatSaberFolders, $file);
     push @$victims, $path;
     loadSongPlayHistoryData2($path, $merged);
   }
@@ -728,7 +778,7 @@ sub loadSongPlayHistoryData {
     $merged->{$key} = $temp;
   }
 
-  saveSongPlayHistoryData($BeatSaberFolder, $merged);
+  saveSongPlayHistoryData($BeatSaberFolder, $merged, $victims);
 
   my $difficulties = [qw(
     Easy
@@ -766,6 +816,34 @@ sub loadSongPlayHistoryData {
     }
 
     $LAST_PLAYED->{$levelId} = $lastPlayed;
+  }
+
+  my $merged2 = {};
+
+  opendir($dh, $BeatSaviorDataAppdataFolder);
+  while (my $file = readdir $dh) {
+    next unless $file =~ m/\.bsd$/;
+    my $path = catdir($BeatSaviorDataAppdataFolder, $file);
+    
+    loadBeatSaviorData($path, $merged2);
+  }
+  closedir $dh;
+
+  foreach my $levelId (keys %{$merged2}) {
+    foreach my $difficulty (keys %{$merged2->{$levelId}}) {
+      foreach my $gameMode (keys %{$merged2->{$levelId}{$difficulty}}) {
+        my $data = $merged2->{$levelId}{$difficulty}{$gameMode};
+
+        my $totalScore = $data->{"totalScore"};
+        my $totalWeight = $data->{"totalWeight"};
+        my $averageScore = $totalScore / $totalWeight;
+
+        my $averageHandDistance = $data->{"totalHandDistance"} / $totalWeight;
+        my $averageSaberDistance = $data->{"totalSaberDistance"} / $totalWeight;
+
+        $AVERAGE_SCORE->{$levelId}{$difficulty}{$gameMode} = $averageScore;
+      }
+    }
   }
 
   foreach my $levelId ($LAST_PLAYED) {
@@ -807,6 +885,24 @@ sub ageWeight {
   return ($age / 7) ** 2;
 }
 
+my $BANNED;
+
+sub loadBannedSongs {
+  my $bannedSongsFile = catfile($PlaylistFolder, "bannedForWorkout.bplist");
+  return unless -f $bannedSongsFile;
+  my $bannedSongsData = decode_json(read_file($bannedSongsFile));
+
+  foreach my $song (@{$bannedSongsData->{songs}}) {
+    my $levelId = $song->{levelid};
+    foreach my $difficultyData (@{$song->{difficulties}}) {
+      my $difficulty = $difficultyData->{name};
+      my $gameMode = $difficultyData->{characteristic};
+      $BANNED->{$levelId}{$difficulty}{$gameMode} = 1;
+    }
+  }
+
+}
+
 sub saveWorkout {
   foreach my $song (@{$NEW_SONG_DATA}) {
     my $hash = uc $song->{songHash};
@@ -829,6 +925,7 @@ sub saveWorkout {
   my $workout;
   my $workoutDuration = 0;
   my $selectedLevels = {};
+  my $thisTimeForSure = 1;
 
   # pick 40 minutes of songs.
   my $targetWorkoutDuration = 40 * 60;
@@ -841,6 +938,7 @@ sub saveWorkout {
       $songId = $SameSongs->{$songId};
       next NEW_SONG if exists $selectedLevels->{$songId};
     }
+    next if exists $BANNED->{$levelId}{$difficultyMap->{$victim->{difficulty}{difficulty}}}{$victim->{difficulty}{gameMode}};
 
     push @{$workout}, $victim;
     $workoutDuration += $victim->{duration};
@@ -866,6 +964,7 @@ sub saveWorkout {
     next unless $gameMode =~ s/^Solo//;
     my $difficultyRank = $data->{difficulty}{difficulty};
     my $difficulty = $difficultyMap->{$difficultyRank};
+    next if exists $BANNED->{$levelId}{$difficulty}{$gameMode};
 
     my $noteCount;
 
@@ -939,6 +1038,12 @@ sub saveWorkout {
       next OLD_SONG if exists $selectedLevels->{$songId};
     }
 
+    if (exists $victim->{potentialImprovement} && $victim->{potentialImprovement} > 1.0) {
+      # we failed last time.
+      next unless $thisTimeForSure;
+      $thisTimeForSure = 0;
+    }
+
     push @{$workout}, $victim;
     $workoutDuration += $victim->{duration};
 
@@ -981,6 +1086,8 @@ loadSongPlayHistoryData();
 
 saveNewSongs();
 saveSongsToImprove();
+
+loadBannedSongs();
 
 saveWorkout();
 
