@@ -57,6 +57,7 @@ $dbh->do("PRAGMA encoding = 'UTF-8'");
 $dbh->do("PRAGMA foreign_keys = ON");
 $dbh->do("PRAGMA journal_mode = WAL");
 $dbh->do("PRAGMA busy_timeout = 250");
+$dbh->do("PRAGMA optimize(0x4)");
 
 sub ts {
   return strftime("%Y-%m-%dT%H:%M:%S", localtime());
@@ -279,9 +280,9 @@ CREATE INDEX IF NOT EXISTS BeatSaviourDataIndex1 ON BeatSaviourData (
 EOF
 
 sub loadBeatSaviorData {
-  my $sth = $dbh->prepare(<<EOF);
+  my $sth = $dbh->prepare(<<'EOF');
 insert or replace into BeatSaviourData (FileDate, RecordNumber, Data)
-values (julianday(?), ?, json(?))
+values (julianday(?), ?, json_remove(json(?),'$.deepTrackers'))
 EOF
 
   opendir(my $dh, $BeatSaviorDataAppdataFolder);
@@ -756,6 +757,10 @@ order by (ImprovementRank + 0.01)
        * (HandSpeedRank + 0.01)
          desc
 EOF
+
+# TODO weight by:
+# * if we liked the song
+# * how long the song is
 
 sub writeWorkout {
 
