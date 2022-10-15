@@ -67,11 +67,8 @@ $dbh->do("PRAGMA encoding = 'UTF-8'");
 $dbh->do("PRAGMA foreign_keys = ON");
 $dbh->do("PRAGMA journal_mode = WAL");
 $dbh->do("PRAGMA busy_timeout = 250");
+$dbh->do("PRAGMA optimize(0x4)");
 #$dbh->do("PRAGMA page_size = 65536");
-
-END {
-  $dbh->do("PRAGMA optimize;");
-}
 
 HTTP::Cache::Transparent::init({
   BasePath => catdir($CacheDir, "http"),
@@ -798,6 +795,18 @@ EOF
   }
 }
 
+sub createBackup {
+  my $backupDir = catdir($DataDir, 'backup');
+
+  make_path $backupDir;
+
+  my $backupFile = strftime('%A.sqlite', localtime());
+
+  my $backupPath = catfile($backupDir, $backupFile);
+
+  $dbh->sqlite_backup_to_file($backupPath);
+}
+
 ##############################################################
 
 make_path $DataDir;
@@ -824,5 +833,10 @@ fetchBeatsaverData();
 renameDownloadedSongs();
 
 fetchNewSongs();
+
+$dbh->do("PRAGMA incremental_vacuum");
+$dbh->do("PRAGMA optimize");
+
+createBackup();
 
 say "Run complete at ", ts();
