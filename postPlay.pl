@@ -505,6 +505,101 @@ delete from BeatSaviourDataFiles
 EOF
 }
 
+sub writeSongsWithoutBeatSaviourStats {
+  my $data = $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0];
+with wePlayedThisEarlier as (
+select Q2.SongHash,
+       CASE when GameMode like 'Solo%' then substr(GameMode, 5) else GameMode end as GameMode,
+       Difficulty,
+       BaseScore / cast(MaxScore as real) as Accuracy
+  from ScoreSaberScores Q1
+  join DownloadedSongs Q2
+    on Q1.SongHash = Q2.SongHash 
+ where Deleted = FALSE
+),
+wePlayedTheseRecently as (
+select SongId as SongHash,
+       COALESCE(GameMode, 'Standard') as GameMode,
+       SongDifficultyRank as Difficulty
+  from BeatSaviourData
+),
+wePlayedThisRecently as (
+  select SongHash,
+         GameMode,
+         Difficulty
+    from wePlayedTheseRecently
+group by SongHash,
+         GameMode,
+         Difficulty
+),
+weHaveNotPlayedThisRecently as (
+   select Q1.SongHash,
+          Q1.GameMode,
+          CASE Q1.Difficulty
+           WHEN 1 THEN 'Easy'
+           WHEN 3 THEN 'Normal'
+           WHEN 5 THEN 'Hard'
+           WHEN 7 THEN 'Expert'
+           WHEN 9 THEN 'ExpertPlus'
+           ELSE Q1.Difficulty
+         END as Difficulty,
+         Accuracy
+     from wePlayedThisEarlier Q1
+left join wePlayedThisRecently Q2
+       on Q1.SongHash = Q2.SongHash
+      and Q1.GameMode = Q2.GameMode
+      and Q1.Difficulty = Q2.Difficulty
+),
+weWantToPlayThisAgain as (
+   select Q1.SongHash,
+          Q1.GameMode,
+          Q1.Difficulty,
+          Accuracy
+     from weHaveNotPlayedThisRecently Q1
+left join BannedSongs Q2
+       on Q1.SongHash = substr(Q2.levelID,14)
+      and Q1.GameMode = Q2.GameMode
+      and Q2.Difficulty = Q2.Difficulty
+    where Q2.levelId is null
+ order by Accuracy desc
+)
+select json_object(
+         'image',
+         '',
+         'playlistAuthor',
+         ?1,
+         'playlistTitle',
+         'Play Again',
+         'songs',
+         json_group_array(
+           json_object(
+             'hash',
+             SongHash,
+             'lastScore',
+             Accuracy,
+             'difficulties',
+             json_array(
+               json_object(
+                 'characteristic', GameMode,
+                 'name', Difficulty
+               )
+             )
+           )
+         )
+       )
+  from weWantToPlayThisAgain
+EOF
+
+  my $target = catfile($PlaylistFolder, 'play-again.bplist');
+
+  if (index($data,'[]') > 0) {
+    unlink $target if (-f $target);
+    return;
+  }
+
+  write_file($target, $data);
+}
+
 sub writeSongsToImprove {
 
   # TODO factor in the time that a given player earned a given score.
@@ -967,9 +1062,6 @@ select Q1.*,
 order by CombinedRank desc
 EOF
 
-# TODO weight by:
-# * how long the song is
-
 sub writeWorkout {
 
   $dbh->do(<<'EOF');
@@ -1137,6 +1229,7 @@ loadDuplicateSongs();
 loadBeatSaviorData();
 pruneBeatSaviorData();
 
+writeSongsWithoutBeatSaviourStats();
 writeSongsToImprove();
 writeNotPlayedSongs();
 writeWorkout();
