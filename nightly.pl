@@ -6,12 +6,6 @@ use strict;
 use v5.16;
 use utf8;
 
-#use File::Find;
-#use Carp qw(croak);
-#use Date::Parse;
-#use Statistics::Regression;
-#use File::stat;
-
 use JSON qw(decode_json encode_json);
 use Cwd qw(abs_path);
 use DBI qw(SQL_NUMERIC);
@@ -430,14 +424,44 @@ EOF
 }
 
 sub pruneNeighbours {
-  # TODO figure out how to prune neighbour score data.
-  $dbh->do(<<'EOF') if 0;
-delete from ScoreSaberNeighbourScores as Q1
- where abs((Q1.BaseScore / (
-    select cast(Q2.BaseScore as real)
-      from ScoreSaberScores Q2
-     WHERE Q2.LeaderboardID = Q1.LeaderboardID
-  )) - 1) > 0.2
+  $dbh->do(<<'EOF');
+With myScores as (
+SELECT LeaderboardID,
+       BaseScore as myScore
+  from ScoreSaberScores
+),
+neighbourScores as (
+SELECT PlayerID,
+       LeaderboardID,
+       BaseScore as neighbourScore
+  from ScoreSaberLeaderboardScores
+),
+scoreRatios as (
+SELECT Q2.PlayerID,
+       abs((neighbourScore / cast(myScore as real)) - 1) as scoreRatio
+  from myScores Q1
+  join neighbourScores Q2
+    on Q1.LeaderboardID = Q2.LeaderboardID
+),
+counted as (
+  SELECT PlayerID,
+         count(*) as commonLeaderboardCount
+    from scoreRatios
+   where scoreRatio < 0.15
+group by PlayerID
+),
+potentialNeighbours as (
+select PlayerID
+  from counted
+ where commonLeaderboardCount > 1
+)
+delete 
+--select distinct PlayerID
+  from ScoreSaberNeighbourScores
+ where PlayerID not in (
+                  select PlayerID
+                    from potentialNeighbours
+                       )
 EOF
 }
 
