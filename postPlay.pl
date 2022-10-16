@@ -871,6 +871,14 @@ SELECT substr(LevelId,14) as SongHash
   FROM FavouriteLevels
  where LevelId like 'custom_level_%'
 ),
+votedSongs2 as (
+select SongHash,
+       Case VoteType
+         WHEN 'Upvote' then 1
+         WHEN 'Downvote' then -1
+       END as Vote
+  from votedSongs
+),
 combined as (
    select Q1.SongHash,
           Q1.Difficulty,
@@ -881,7 +889,8 @@ combined as (
           Q3.SaberSpeed,
           Q3.HandSpeed,
           CASE WHEN Q4.SongHash is not NULL THEN 1 ELSE 0 END as IsFavorite,
-          Q1.Duration
+          Q1.Duration,
+          coalesce(Vote,0) as Vote
      from filteredTheirAverageAccuracy Q1
 left join myAccuracy Q2
        on Q1.SongHash = Q2.SongHash
@@ -895,6 +904,8 @@ left join favouriteSongs Q4
        on Q1.SongHash = Q4.SongHash
 left join recentSongs Q5
        on Q1.SongHash = Q5.SongHash
+left join votedSongs2 Q6
+       on Q1.SongHash = upper(Q6.SongHash)
 ),
 calculations as (
 select SongHash,
@@ -911,7 +922,8 @@ select SongHash,
        HandSpeed,
        IsFavorite,
        Duration,
-       abs((3 * 60) - Duration) as OffsetFromDesiredTime
+       abs((3 * 60) - Duration) as OffsetFromDesiredTime,
+       Vote
   from combined
  where (Age is NULL or AGE > 1)
 ),
@@ -936,7 +948,9 @@ ranked as (
          percent_rank() over (order by COALESCE(HandSpeed, AverageHandSpeed) asc) as HandSpeedRank,
          IsFavorite,
          strftime('%M:%S', Duration, 'unixepoch') as Duration,
-         percent_rank() over (order by OffsetFromDesiredTime desc) as DurationRank
+         percent_rank() over (order by OffsetFromDesiredTime desc) as DurationRank,
+         Vote,
+         (Vote + 2) / 3.0 as VoteRank
     from calculations,
          averages
 )
@@ -947,6 +961,7 @@ select Q1.*,
        * (WristFactorRank + 0.01)
        * (HandSpeedRank + 0.01)
        * (IsFavorite + 1)
+       * (VoteRank)
        * (DurationRank + 0.01) as CombinedRank
     from ranked Q1
 order by CombinedRank desc
