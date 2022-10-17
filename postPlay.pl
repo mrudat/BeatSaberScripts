@@ -549,6 +549,7 @@ left join wePlayedThisRecently Q2
        on Q1.SongHash = Q2.SongHash
       and Q1.GameMode = Q2.GameMode
       and Q1.Difficulty = Q2.Difficulty
+    where Q2.SongHash is null
 ),
 weWantToPlayThisAgain as (
    select Q1.SongHash,
