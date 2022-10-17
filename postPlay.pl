@@ -37,6 +37,8 @@ my $BeatSaberAppdataFolder = catdir($ENV{localappdata},updir(),"LocalLow","Hyper
 
 my $BeatSaviorDataAppdataFolder = catdir($ENV{localappdata},updir(),"Roaming","Beat Savior Data");
 
+my $YURFitAppdataFolder = catdir($ENV{localappdata}, ".yurfit");
+
 my $PlaylistFolder = catdir($BSLegacyLauncherFolder, "Playlists");
 
 my $SongsFolder = catdir($BSLegacyLauncherFolder, "CustomLevels");
@@ -501,6 +503,165 @@ delete from BeatSaviourDataFiles
            select ROWID
              from Numbered
             where row_num > 30
+                )
+EOF
+}
+
+  $dbh->do(<<'EOF');
+CREATE TABLE IF NOT EXISTS YURFitData (
+  FileDate DATE,
+  SongHash TEXT,
+  GameMode TEXT,
+  Difficulty TEXT,
+  MinBPM INTEGER,
+  AverageBPM INTEGER,
+  MaxBPM INTEGER,
+  PRIMARY KEY(FileDate, SongHash, GameMode, Difficulty)
+)
+EOF
+
+$dbh->do(<<EOF);
+CREATE TABLE IF NOT EXISTS YURFitFiles (
+  FileDate DATE primary key,
+  LastModified TIMESTAMP
+)
+EOF
+
+sub loadYURFitData {
+  $dbh->do(<<'EOF');
+CREATE TEMPORARY TABLE YURFitTemp (
+  FileDate DATE,
+  SongName TEXT,
+  Difficulty TEXT,
+  MinBPM INTEGER,
+  AverageBPM INTEGER,
+  MaxBPM INTEGER,
+  PRIMARY KEY(FileDate, SongName, Difficulty)
+)
+EOF
+
+  my $getLastModified = $dbh->prepare(<<'EOF');
+select LastModified
+  from YURFitFiles
+ where FileDate = julianday(?)
+EOF
+
+  my $saveLastModified = $dbh->prepare(<<'EOF');
+insert or replace into YURFitFiles (FileDate, LastModified)
+values (julianday(?), ?)
+EOF
+
+  my $recordBPM = $dbh->prepare(<<'EOF');
+INSERT OR REPLACE INTO YURFitTemp (FileDate, SongName, Difficulty, MinBPM, AverageBPM, MaxBPM)
+Values (julianday(?), ?, ?, ?, cast(? as integer), ?)
+EOF
+
+  my $logDir = catdir($YURFitAppdataFolder, "logs");
+
+  opendir(my $dh, $logDir);
+
+  while (my $name = readdir $dh) {
+    next unless $name =~ m/^YUR\.Fit\.Windows\.Service-(\d\d\d\d)(\d\d)(\d\d)\.txt/;
+    my ($fileDate) = "$1-$2-$3";
+
+    my $filePath = catfile($logDir, $name);
+
+    my $st = stat $filePath;
+
+    next unless $st && -f $st;
+
+    my $lastModified = $st->mtime;
+
+    $getLastModified->execute($fileDate);
+    my $oldLastModified = $getLastModified->fetchrow_array();
+
+    next if $oldLastModified && $oldLastModified == $lastModified;
+
+    say "Reading $filePath at ", ts();
+
+    open my $fh, "<", $filePath;
+
+    my ($data, $thing);
+
+    while (my $line = <$fh>) {
+      if ($line =~ m/^\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\d\d\d\d\d[+-]\d\d:\d\d  \[INF\] Set workout metadata to (.+) \([0-9a-f]+\)/) {
+        $thing = $1;
+      }
+      if ($line =~ m/^\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\d\d\d\d\d[+-]\d\d:\d\d  \[INF\] Got heart rate: (\d+)/) {
+        if ($thing) {
+          push @{$data->{$thing}}, $1;
+        }
+      }
+    }
+
+    close $fh;
+
+    $dbh->begin_work();
+
+    foreach $thing (keys %{$data}) {
+      next if $thing eq "Main Menu";
+
+      next unless $thing =~ m/^(.*) - (.*)$/;
+      my ($songName, $difficulty) = ($1, $2);
+
+      my ($min, $max, $sum, $count);
+      $min = $max = $data->{$thing}[0];
+
+      foreach my $bpm (@{$data->{$thing}}) {
+        $max = $bpm if $bpm > $max;
+        $min = $bpm if $bpm < $min;
+        $sum += $bpm;
+        $count++;
+      }
+
+      my $average = $sum / $count;
+      $recordBPM->execute($fileDate, $songName, $difficulty, $min, $average, $max);
+    }
+
+    $dbh->do(<<'EOF');
+insert or replace into YURFitData (FileDate, SongHash, GameMode, Difficulty, MinBPM, AverageBPM, MaxBPM)
+select Q1.FileDate, SongId, GameMode, SongDifficultyRank, MinBPM, AverageBPM, MaxBPM 
+  from YURFitTemp Q1
+  join BeatSaviourData Q2
+    on Q1.FileDate = Q2.FileDate 
+   and Q1.SongName = json_extract(Data, '$.songName')
+   and lower(Q1.Difficulty) = json_extract(Data, '$.songDifficulty')
+EOF
+
+    $saveLastModified->execute($fileDate, $lastModified);
+
+    $dbh->commit();
+  }
+  closedir $dh;
+
+}
+
+sub pruneYURFitData {
+  $dbh->do(<<'EOF');
+WITH Numbered AS (
+Select ROWID,
+       ROW_NUMBER() OVER (PARTITION BY SongHash, GameMode, Difficulty order by FileDate desc) as ROW_NUM
+  from YURFitData Q1
+)
+DELETE FROM YURFitData
+ WHERE ROWID IN (
+          select ROWID
+            from Numbered
+           where row_num > 30
+                )
+EOF
+
+  $dbh->do(<<EOF);
+with Numbered as (
+select ROWID,
+       ROW_NUMBER() over (order by fileDate desc) as row_num
+  from YURFitFiles
+)
+delete from YURFitFiles
+ where ROWID in (
+           select ROWID
+             from Numbered
+            where row_num > 31
                 )
 EOF
 }
@@ -975,6 +1136,38 @@ select SongHash,
        END as Vote
   from votedSongs
 ),
+YURFitDataWeighted as (
+Select SongHash,
+       COALESCE(GameMode, 'Standard') as GameMode,
+       Difficulty,
+       MinBPM,
+       AverageBPM,
+       MaxBPM,
+       1/(julianday('now') - FileDate) as Weight
+  from YURFitData
+),
+YURFitDataSummed as (
+  Select SongHash,
+         GameMode,
+         Difficulty,
+         sum(MinBPM * Weight) as TotalMinBPM,
+         sum(AverageBPM * Weight) as TotalAverageBPM,
+         sum(MaxBPM * Weight) as TotalMaxBPM,
+         sum(Weight) as TotalWeight
+  from YURFitDataWeighted
+group by SongHash,
+         GameMode,
+         Difficulty
+),
+YURFitDataAverage as (
+Select SongHash,
+       GameMode,
+       Difficulty,
+       cast(TotalMinBPM / TotalWeight as integer) as MinBPM,
+       cast(TotalAverageBPM / TotalWeight as integer) as AverageBPM,
+       cast(TotalMaxBPM / TotalWeight as integer) as MaxBPM
+  from YURFitDataSummed
+),
 combined as (
    select Q1.SongHash,
           Q1.Difficulty,
@@ -986,7 +1179,10 @@ combined as (
           Q3.HandSpeed,
           CASE WHEN Q4.SongHash is not NULL THEN 1 ELSE 0 END as IsFavorite,
           Q1.Duration,
-          coalesce(Vote,0) as Vote
+          coalesce(Vote,0) as Vote,
+          MinBPM,
+          AverageBPM,
+          MaxBPM
      from filteredTheirAverageAccuracy Q1
 left join myAccuracy Q2
        on Q1.SongHash = Q2.SongHash
@@ -1002,6 +1198,10 @@ left join recentSongs Q5
        on Q1.SongHash = Q5.SongHash
 left join votedSongs2 Q6
        on Q1.SongHash = upper(Q6.SongHash)
+left join YURFitDataAverage Q7
+       on Q1.SongHash = Q7.SongHash
+      and Q1.Difficulty = Q7.Difficulty
+      and Q1.GameMode = Q7.GameMode
 ),
 calculations as (
 select SongHash,
@@ -1019,9 +1219,13 @@ select SongHash,
        IsFavorite,
        Duration,
        abs((3 * 60) - Duration) as OffsetFromDesiredTime,
-       Vote
+       Vote,
+       MinBPM,
+       AverageBPM,
+       MaxBPM,
+       abs(132 - AverageBPM) as OffsetFromDesiredBPM
   from combined
- where (Age is NULL or AGE > 1)
+ where (Age is NULL or AGE > 7)
 ),
 averages as (
 select avg(WristFactor) as AverageWristFactor,
@@ -1029,26 +1233,31 @@ select avg(WristFactor) as AverageWristFactor,
   from calculations
 ),
 ranked as (
-  select SongHash,
-         Difficulty,
-         GameMode,
-         PotentialImprovement,
-         percent_rank() over (order by PotentialImprovement asc nulls first) as ImprovementRank,
-         PotentialScore,
-         percent_rank() over (order by PotentialScore asc nulls first) as PotentialScoreRank,
-         Age,
-         percent_rank() over (order by Age asc nulls last) as AgeRank,
-         WristFactor,
-         percent_rank() over (order by COALESCE(WristFactor, AverageWristFactor) asc) as WristFactorRank,
-         HandSpeed,
-         percent_rank() over (order by COALESCE(HandSpeed, AverageHandSpeed) asc) as HandSpeedRank,
-         IsFavorite,
-         strftime('%M:%S', Duration, 'unixepoch') as Duration,
-         percent_rank() over (order by OffsetFromDesiredTime desc) as DurationRank,
-         Vote,
-         (Vote + 2) / 3.0 as VoteRank
-    from calculations,
-         averages
+select SongHash,
+       Difficulty,
+       GameMode,
+       PotentialImprovement,
+       percent_rank() over (order by PotentialImprovement asc nulls first) as ImprovementRank,
+       PotentialScore,
+       percent_rank() over (order by PotentialScore asc nulls first) as PotentialScoreRank,
+       Age,
+       percent_rank() over (order by Age asc nulls last) as AgeRank,
+       WristFactor,
+       percent_rank() over (order by COALESCE(WristFactor, AverageWristFactor) asc) as WristFactorRank,
+       HandSpeed,
+       percent_rank() over (order by COALESCE(HandSpeed, AverageHandSpeed) asc) as HandSpeedRank,
+       IsFavorite,
+       strftime('%M:%S', Duration, 'unixepoch') as Duration,
+       percent_rank() over (order by OffsetFromDesiredTime desc) as DurationRank,
+       Vote,
+       (Vote + 2) / 3.0 as VoteRank,
+       MinBPM,
+       AverageBPM,
+       MaxBPM,
+       OffsetFromDesiredBPM,
+       percent_rank() over (order by OffsetFromDesiredBPM desc nulls first) as BPMRank
+  from calculations,
+       averages
 )
 select Q1.*,
          (ImprovementRank + 0.01)
@@ -1056,6 +1265,7 @@ select Q1.*,
        * (AgeRank + 0.01)
        * (WristFactorRank + 0.01)
        * (HandSpeedRank + 0.01)
+       * (BPMRank + 0.01)
        * (IsFavorite + 1)
        * (VoteRank)
        * (DurationRank + 0.01) as CombinedRank
@@ -1229,6 +1439,9 @@ loadDuplicateSongs();
 
 loadBeatSaviorData();
 pruneBeatSaviorData();
+
+loadYURFitData();
+pruneYURFitData();
 
 writeSongsWithoutBeatSaviourStats();
 writeSongsToImprove();
