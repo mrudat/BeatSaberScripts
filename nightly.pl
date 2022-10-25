@@ -470,7 +470,8 @@ CREATE TABLE IF NOT EXISTS DownloadedSongs (
   SongHash TEXT PRIMARY KEY,
   SongDir TEXT,
   BeatSaverData TEXT,
-  Deleted INTEGER
+  Deleted INTEGER,
+  Duration INTEGER GENERATED ALWAYS AS (json_extract(BeatSaverData, '$.metadata.duration')) virtual
 )
 EOF
 
@@ -660,7 +661,7 @@ EOF
 
   $namesToFix->execute();
   while (my ($songDir, $mapName) = $namesToFix->fetchrow_array()) {
-    $mapName =~ s{[<>:/\\|?*"\x00-\x1f].*$}{};
+    $mapName =~ s{[<>:/\\|?*"\x00-\x1f]}{}g;
     next if lc $songDir eq lc $mapName;
     say "renaming $songDir to $mapName";
     my $oldPath = catdir($SongsFolder, $songDir);
@@ -788,7 +789,7 @@ EOF
     my $songName = $data->{metadata}{songName};
     my $levelAuthorName = $data->{metadata}{levelAuthorName};
     my $songDirectory = "${id} (${songName} - ${levelAuthorName})";
-    $songDirectory =~ s{[<>:/\\|?*"\x00-\x1f].*$}{};
+    $songDirectory =~ s{[<>:/\\|?*"\x00-\x1f].*$}{}g;
 
     my $songPath = catdir($SongsFolder, $songDirectory);
 
