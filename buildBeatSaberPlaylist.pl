@@ -1,4 +1,4 @@
-#!perl
+#!/usr/bin/perl -CSDA
 
 use warnings;
 use strict;
@@ -6,7 +6,7 @@ use strict;
 use v5.16;
 use utf8;
 
-
+use Encode qw(encode decode);
 use JSON qw(decode_json encode_json);
 use Cwd qw(abs_path);
 use DBI qw(SQL_NUMERIC);
@@ -19,7 +19,7 @@ use HTTP::Cache::Transparent;
 use POSIX qw(ceil floor strftime round);
 use Time::HiRes qw(time sleep);
 use File::Path qw(make_path remove_tree);
-use Digest::SHA1;
+use Digest::SHA;
 use File::Slurp;
 use Archive::Zip;
 use IO::Compress::Gzip qw(gzip Z_BEST_COMPRESSION);
@@ -28,6 +28,7 @@ use IPC::System::Simple qw(capturex);
 use Time::Local qw(timelocal_modern);
 use English qw(-no_match_vars);
 use autodie qw(:all);
+use autodie qw(encode decode decode_json encode_json abs_path catdir catfile updir rel2abs ceil floor strftime round time sleep gzip timelocal_modern);
 
 $Carp::Verbose = 1;
 
@@ -40,25 +41,38 @@ my $SECONDS_IN_15_MINUTES = 15 * 60;
 my $SECONDS_IN_SIX_MONTHS = 6 * 30 * $SECONDS_PER_DAY;
 my $SECONDS_PER_WEEK = $SECONDS_PER_DAY * 7;
 
-my $DataDir = catdir(abs_path(__FILE__), updir(), "data");
+my $DataDir = catdir($ENV{HOME}, ".BeatSaberScripts");
 
 my $CacheDir = catdir($DataDir, "cache");
 
-my $BeatSaberFolder = "G:\\Steam\\steamapps\\common\\Beat Saber";
-my $BSLegacyLauncherFolder = "G:\\Modding\\Beat Saber\\BSLegacyLauncher";
+my $BeatSaberFolder = "/mnt/g/Steam/steamapps/common/Beat Saber";
+my $BSLegacyLauncherFolder = "/mnt/g/Modding/Beat Saber/BSLegacyLauncher";
 my $BeatSaberFolders = catdir($BSLegacyLauncherFolder, "Installed Versions");
 
-my $BeatSaberAppdataFolder = catdir($ENV{localappdata},updir(),"LocalLow","Hyperbolic Magnetism","Beat Saber");
+my ($appDataFolder, $localAppDataFolder, $localLowAppDataFolder);
+do {
+  $appDataFolder = capturex("wslvar", "APPDATA");
+  chomp($appDataFolder);
+  $appDataFolder = capturex("wslpath", $appDataFolder);
+  chomp($appDataFolder);
 
-my $BeatSaviorDataAppdataFolder = catdir($ENV{localappdata},updir(),"Roaming","Beat Savior Data");
+  $localAppDataFolder = capturex("wslvar", "LOCALAPPDATA");
+  chomp($localAppDataFolder);
+  $localAppDataFolder = capturex("wslpath", $localAppDataFolder);
+  chomp($localAppDataFolder);
 
-my $YURFitAppdataFolder = catdir($ENV{localappdata}, ".yurfit");
+  $localLowAppDataFolder = abs_path(catdir($localAppDataFolder, updir(), "LocalLow"));
+};
+
+my $BeatSaberAppdataFolder = catdir($localLowAppDataFolder, "Hyperbolic Magnetism", "Beat Saber");
+
+my $BeatSaviorDataAppdataFolder = catdir($appDataFolder,"Beat Savior Data");
+
+my $YURFitAppdataFolder = catdir($localAppDataFolder, ".yurfit");
 
 my $PlaylistFolder = catdir($BSLegacyLauncherFolder, "Playlists");
 
 my $SongsFolder = catdir($BSLegacyLauncherFolder, "CustomLevels");
-
-my $FPCALC_PATH = "C:\\Program Files\\MusicBrainz Picard\\fpcalc.exe";
 
 my $ACOUSTID_CLIENT_KEY = "wkf2hknaKU";
 
@@ -72,7 +86,12 @@ my $BUILTIN_MAP_ACOUSTIDs = {
 
 my $dbFile = catfile($DataDir, "data.sqlite");
 
-my $dbh = DBI->connect("dbi:SQLite:dbname=$dbFile","","");
+my $dbh = DBI->connect(
+  "dbi:SQLite:dbname=$dbFile","","",
+  {
+    sqlite_unicode => 1,
+  }
+);
 $dbh->{HandleError} = sub { confess(shift) };
 
 $dbh->do("PRAGMA auto_vacuum = INCREMENTAL");
@@ -150,6 +169,12 @@ $ua2->add_handler(
 
 sub ts {
   return strftime("%Y-%m-%dT%H:%M:%S", localtime());
+}
+
+sub replaceInvalidCharacters {
+  my ($data) = @_;
+  $data =~ tr/<>:\/\\|?*"\x00-\x1f/‹›∶⁄⧵ǀ？∗″/d;
+  return $data;
 }
 
 sub get2 {
@@ -380,6 +405,7 @@ insert into Beatmaps (
   LevelId,
   GameMode,
   Difficulty,
+  LeaderboardID,
   BestAccuracy,
   TopScorePlayed
 )
@@ -387,6 +413,7 @@ with recentScores as (
 select SongHash,
        CASE when GameMode like 'Solo%' then substr(GameMode, 5) else GameMode end as GameMode,
        Difficulty,
+       Q1.LeaderboardID,
        julianday(TimeSet, 'unixepoch') as LastPlayed,
        1/(JULIANDAY('now') - JULIANDAY(TimeSet, 'unixepoch')) as Weight,
        BaseScore / cast(MaxScore as real) as Accuracy
@@ -399,6 +426,7 @@ select SongHash,
 select 'custom_level_' || upper(SongHash) as LevelID,
        GameMode,
        Difficulty,
+       LeaderboardID,
        sum(Accuracy * Weight) / sum(Weight) as MyAccuracy,
        max(LastPlayed) as LastPlayed
   from recentScores
@@ -408,7 +436,8 @@ select 'custom_level_' || upper(SongHash) as LevelID,
 on CONFLICT DO
 UPDATE
    SET TopScorePlayed = excluded.TopScorePlayed,
-       BestAccuracy = excluded.BestAccuracy
+       BestAccuracy = excluded.BestAccuracy,
+       LeaderboardID = excluded.LeaderboardID
  where TopScorePlayed is null
     or TopScorePlayed <> excluded.TopScorePlayed
 EOF
@@ -705,50 +734,70 @@ EOF
       last if $remaining <= 0;
     }
   }
+}
 
-  $dbh->do(<<EOF);
+sub updatePredictedAccuracy {
+  $dbh->do(<<'EOF');
 insert into Beatmaps (
   LevelID,
   GameMode,
   Difficulty,
   PredictedAccuracy
 )
-with Accuracy as (
-select Q1.LeaderBoardID,
-       Q3.PlayerID,
-       (Q2.BaseScore * 1.0 / Q1.MaxScore) as MyAccuracy,
-       (Q3.BaseScore * 1.0 / Q1.MaxScore) as TheirAccuracy
-  from Leaderboards Q1
-  join MyScoreSaberScores Q2
-    on Q1.LeaderBoardID = Q2.LeaderBoardID 
-  join TheirScoreSaberScores Q3
-    on Q1.LeaderBoardID = Q3.LeaderBoardID
- where Q1.MaxScore <> 0
-   and Q2.BaseScore <> 0
-   and Q3.BaseScore <> 0
-),
-Similarity as (
-  select PlayerID,
-         1 - sqrt(avg(power(MyAccuracy - TheirAccuracy,2))) as Similarity
-    from Accuracy
-group by PlayerID
-),
-TheirAccuracy as (
+with TheirAccuracy as (
 select Q1.LeaderBoardID,
        Q2.PlayerID,
+       MaxScore,
        (Q2.BaseScore * 1.0 / Q1.MaxScore) as TheirAccuracy
   from Leaderboards Q1
   join TheirScoreSaberScores Q2
     on Q1.LeaderBoardID = Q2.LeaderBoardID
- where Q1.MaxScore <> 0
-   and Q2.BaseScore <> 0
+ where MaxScore > 1000
+   and BaseScore <> 0
+   and json_extract(Q2.Data, '$.modifiers') in ('', 'NF', 'BE', 'IF')
+),
+Accuracy as (
+select Q1.LeaderBoardID,
+       PlayerID,
+       Q2.MyAccuracy,
+       TheirAccuracy
+  from TheirAccuracy Q1
+  join Beatmaps Q2
+    on Q1.LeaderBoardID = Q2.LeaderBoardID 
+ where MyAccuracy is not NULL
+),
+Similarity as (
+  select PlayerID,
+         1 - sqrt(avg(power(MyAccuracy - TheirAccuracy,2))) as Similarity,
+         avg((MyAccuracy - TheirAccuracy)/((MyAccuracy + TheirAccuracy)/2)) as Similarity2,
+         count(*) as SimilarScoreCount
+    from Accuracy
+group by PlayerID
+  having count(*) >= 3
+),
+TheirAccuracyCount as (
+  select PlayerID,
+         count(*) as TotalScoreCount
+    from TheirAccuracy
+group by PlayerID
+),
+Combined as (
+      select PlayerID,
+             Similarity * SimilarScoreCount / TotalScoreCount as Weight,
+             Similarity2
+        from Similarity
+natural join TheirAccuracyCount
 ),
 PredictedAccuracy as (
       select LeaderBoardID,
-             sum(TheirAccuracy * Similarity) / sum(Similarity) as PredictedAccuracy
-        from TheirAccuracy Q1
-natural join Similarity Q2
-    group by LeaderBoardID 
+             sum(TheirAccuracy * Weight) / sum(Weight) as PredictedAccuracy,
+             avg(Similarity2) as AvgSimilarity2
+        from TheirAccuracy
+natural join Combined
+       where Weight > 0.1
+    group by LeaderBoardID
+      having count(*) >= 3
+         and avg(Similarity2) >= -0.02
 )
 select LevelID,
        substr(GameMode,5) as GameMode,
@@ -762,22 +811,9 @@ on CONFLICT DO
 UPDATE
    SET PredictedAccuracy = excluded.PredictedAccuracy
 EOF
+}
 
-=for comment
-
-  # we can do at least as good as we did earlier.
-  $dbh->do(<<EOF);
-Update Beatmaps
-   set PredictedAccuracy = BestAccuracy
- where (
-         PredictedAccuracy is NULL
-      or PredicatedAccuracy < BestAccuracy
-       )
-   and BestAccuracy is not NULL
-EOF
-
-=cut
-
+sub updateProjectedAccuracy {
   # project new score from trends of changing score over time
   $dbh->do(<<EOF);
 with a as (
@@ -845,22 +881,20 @@ group by Band
 ),
 AdjustedAccuracyPerDay as (
       select AverageAccuracy,
-             max(AccuracyPerDay,min(AccuracyPerDay + StdDev,0)) AdjustedAccuracyPerDay
+             max(AccuracyPerDay,min(AccuracyPerDay + StdDev,0.0001/365)) AdjustedAccuracyPerDay
         from BandRanges
 natural join AverageSlope
 ),
 PlayTimes as (
 select rowid as BeatmapID,
        coalesce(MyAccuracy,BestAccuracy) as Accuracy,
-       max(LastPlayed, TopScorePlayed, YURFitDataTime) as LastPlayed,
-       PredictedAccuracy
+       max(coalesce(LastPlayed,0), coalesce(TopScorePlayed,0), coalesce(YURFitDataTime,0)) as LastPlayed
   from Beatmaps
 ),
 FilteredPlayTimes as (
 select BeatmapID,
        Accuracy,
-       LastPlayed,
-       PredictedAccuracy
+       LastPlayed
   from PlayTimes
  where Accuracy is not null
    and LastPlayed is not null
@@ -869,7 +903,6 @@ TwoColumnSelectExpressionPart1 as (
 select BeatmapID,
        Accuracy,
        LastPlayed,
-       PredictedAccuracy,
        (
   select AverageAccuracy
     from AdjustedAccuracyPerDay
@@ -890,7 +923,6 @@ TwoColumnSelectExpressionPart2 as (
 select BeatmapID,
        Accuracy,
        LastPlayed,
-       PredictedAccuracy,
        AverageAccuracyLow,
        (
   select AdjustedAccuracyPerDay
@@ -909,7 +941,6 @@ LinearInterpolation as (
 select BeatmapID,
        Accuracy,
        LastPlayed,
-       PredictedAccuracy,
        CASE
          WHEN AverageAccuracyLow is NULL
            THEN AdjustedAccuracyPerDayHigh
@@ -926,13 +957,11 @@ ProjectedAccuracy as (
 select BeatmapID,
        Accuracy,
        LastPlayed,
-       PredictedAccuracy,
        Accuracy + ((julianday('now') - LastPlayed) * AdjustedAccuracyPerDay) as ProjectedAccuracy
   from LinearInterpolation
- where ProjectedAccuracy > PredictedAccuracy
 )
 Update Beatmaps as Q1
-   set PredictedAccuracy = ProjectedAccuracy
+   set ProjectedAccuracy = Q2.ProjectedAccuracy
   from ProjectedAccuracy as Q2
  where Q1.rowid = Q2.BeatmapID
 EOF
@@ -1031,12 +1060,15 @@ INSERT INTO SeenSongs (SongDir)
 VALUES (?)
 EOF
 
-  my $digest = Digest::SHA1->new();
+  my $digest = Digest::SHA->new(1);
 
   opendir(my $dh, $SongsFolder);
 
+  use Data::Dumper;
+
   while (my $name = readdir $dh) {
     next if $name =~ m/^\./;
+    next if $name =~ m/^$/;
 
     my $songDir = catdir($SongsFolder, $name);
 
@@ -1046,6 +1078,8 @@ EOF
 
     next unless -f $infoFile;
 
+    $name = decode('UTF-8', $name);
+
     $getHaveHash->execute($name);
     my ($haveHash) = $getHaveHash->fetchrow_array();
 
@@ -1053,6 +1087,9 @@ EOF
       $recordSeen->execute($name);
       next;
     }
+
+    # TODO produce 300x300 cover for later?
+    # TODO perform mergeSongFiles now?
 
     eval {
       my $infoText = read_file($infoFile, { binmode => ':raw' });
@@ -1105,21 +1142,26 @@ SELECT SongHash,
   FROM Counted
  WHERE SongCount > 1
 EOF
-  my ($songHash, $songDir) = @{$row};
+    my ($songHash, $songDir) = @{$row};
 
-  say "Found duplicate $songHash";
-  my $songDirs = decode_json($songDir);
+    say "Found duplicate $songHash";
+    my $songDirs = decode_json($songDir);
 
-  my $keptDir = shift @$songDirs;
-  say "keeping $keptDir";
+    my $keptDir;
 
-  foreach my $songDir (@{$songDirs}) {
-    my $songPath = catdir($SongsFolder, $songDir);
-    say "removing $songPath";
-    remove_tree($songPath);
+    foreach my $songDir (@{$songDirs}) {
+      my $songPath = catdir($SongsFolder, encode('UTF-8', $songDir));
+      next unless -d $songPath;
+      if (!defined $keptDir) {
+        $keptDir = $songDir;
+        say "keeping $songDir";
+        next;
+      }
+      say "removing $songPath";
+      remove_tree($songPath);
+    }
+    print "\n";
   }
-  print "\n";
-}
 
   $dbh->do(<<'EOF');
 INSERT INTO DownloadedSongs (SongHash, SongDir)
@@ -1178,7 +1220,8 @@ with MapNames as (
 select SongDir,
        json_extract(BeatSaverData, '$.id') || ' (' || json_extract(BeatSaverData, '$.metadata.songName') || ' - ' || json_extract(BeatSaverData, '$.metadata.levelAuthorName') || ')' as MapName
   from DownloadedSongs ds
- where BeatSaverData is not NULL 
+ where BeatSaverData is not NULL
+   and not Deleted
 )
 select SongDir, MapName
   from MapNames
@@ -1187,13 +1230,17 @@ EOF
 
   $namesToFix->execute();
   while (my ($songDir, $mapName) = $namesToFix->fetchrow_array()) {
-    $mapName =~ s{[<>:/\\|?*"\x00-\x1f]}{}g;
-    next if lc $songDir eq lc $mapName;
+    $mapName = replaceInvalidCharacters($mapName);
+    next if $songDir eq $mapName;
     say "renaming $songDir to $mapName";
+    $songDir = encode('UTF-8', $songDir);
+    $mapName = encode('UTF-8', $mapName);
     my $oldPath = catdir($SongsFolder, $songDir);
+    my $tempPath = catdir($SongsFolder, "$mapName-tmp");
     my $newPath = catdir($SongsFolder, $mapName);
     eval {
-      rename $oldPath, $newPath;
+      rename($oldPath, $tempPath);
+      rename($tempPath, $newPath);
     };
     if ($EVAL_ERROR) {
       warn $EVAL_ERROR;
@@ -1208,6 +1255,11 @@ sub fetchNewSongs {
    where Hash is not null
      and LikeFactor is not null
      and ( IsDownloaded is NULL or IsDownloaded = FALSE )
+     and LevelID in (
+    select LevelID
+      from Beatmaps
+     where PredictedAccuracy > 0.6
+     )
 order by LikeFactor desc
 EOF
 
@@ -1257,9 +1309,9 @@ EOF
     my $songName = $data->{metadata}{songName};
     my $levelAuthorName = $data->{metadata}{levelAuthorName};
     my $songDirectory = "${id} (${songName} - ${levelAuthorName})";
-    $songDirectory =~ s{[<>:/\\|?*"\x00-\x1f]}{}g;
+    $songDirectory = replaceInvalidCharacters($songDirectory);
 
-    my $songPath = catdir($SongsFolder, $songDirectory);
+    my $songPath = catdir($SongsFolder, encode('UTF-8', $songDirectory));
 
     eval {
       my $zip = Archive::Zip->new();
@@ -1306,6 +1358,87 @@ UPDATE
        IsDeleted = excluded.IsDeleted,
        Duration = excluded.Duration
 EOF
+}
+
+sub mergeSongFiles {
+  my ($dotMusicFolder) = catdir($SongsFolder, ".music");
+  opendir(my $songsDh, $SongsFolder);
+  while (my $songDirName = readdir($songsDh)) {
+    next if $songDirName =~ m/^\./;
+    my $songFolder = catdir($SongsFolder, $songDirName);
+    next unless -d $songFolder;
+    opendir(my $songDh, $songFolder);
+    while (my $filename = readdir($songDh)) {
+      next if $filename =~ m/^\./;
+
+      next unless $filename =~ m/\.(egg)$/;
+
+      my $file = catfile($songFolder, $filename);
+
+      my $st = stat $file;
+
+      next unless -f $st;
+
+      next if $st->nlink > 1;
+
+      my $hash = capturex("ffmpeg", "-i", $file, "-map", "0:a", "-c", "copy", "-f", "md5", "-");
+      chomp($hash);
+      next unless $hash =~ s/^MD5=//;
+      # TODO remember hash for later
+      # TODO build 300x300 image, store in music directory
+      # TODO rebuild image from cover embedded in song file if updated.
+      # TODO read Info.dat
+
+      my $musicPath = catdir($dotMusicFolder, $hash);
+      my $musicFile = catfile($musicPath, "song.ogg");
+      my $infoPath = catfile($songFolder, "Info.dat");
+      my $musicInfoPath = catdir($musicPath, "$songDirName.dat");
+
+      say "$file -> $musicFile";
+      say "$infoPath -> $musicInfoPath";
+
+      my $tmpFile = "$file.tmp";
+      my $tmpMusicInfoPath = "$musicInfoPath.tmp";
+
+      make_path($musicPath);
+
+      link($infoPath, $tmpMusicInfoPath);
+      rename($tmpMusicInfoPath, $musicInfoPath);
+
+      my $index;
+      my $targetMusicFile = $musicFile;
+      while (-f $targetMusicFile) {
+        $index++;
+        $targetMusicFile = catfile($musicPath, "song ($index).ogg");
+      }
+      say "Saving another copy in case it has better metadata." if ($index);
+      rename($file, $targetMusicFile);
+      link($musicFile, $tmpFile);
+      rename($tmpFile, $file);
+
+    }
+    closedir $songDh;
+  }
+  closedir $songsDh;
+
+  opendir(my $musicDh, $dotMusicFolder);
+  while(my $dirname = readdir $musicDh) {
+    next if $dirname =~ m/^\./;
+
+    my $dir = catdir($dotMusicFolder, $dirname);
+
+    my $file = catfile($dir, "song.ogg");
+
+    my $st = stat $file;
+
+    next if $st->nlink > 1;
+
+    say "removing $dirname as no levels reference it.";
+
+    remove_tree($dir);
+  }
+
+  closedir $musicDh;
 }
 
 $dbh->do(<<'EOF');
@@ -1363,7 +1496,7 @@ EOF
   $needFingerprint->execute();
 
   while(my ($rowid, $songDirName) = $needFingerprint->fetchrow_array()) {
-    my ($songDir) = catdir($SongsFolder, $songDirName);
+    my ($songDir) = catdir($SongsFolder, encode('UTF-8', $songDirName));
 
     next unless -d $songDir;
 
@@ -1375,13 +1508,14 @@ EOF
 
     my ($songFileName) = $info->{_songFilename};
 
-    my ($songFile) = catfile($songDir, $songFileName);
+    my ($songFile) = catfile($songDir, encode('UTF-8', $songFileName));
 
     next unless -f $songFile;
 
-    say "Calculating fingerprint of $songFile";
+    my ($displaySongFile) = catfile(catdir($SongsFolder, $songDirName), $songFileName);
+    say "Calculating fingerprint of $displaySongFile";
 
-    my ($fingerprintJson) = capturex($FPCALC_PATH, "-json", $songFile);
+    my ($fingerprintJson) = capturex("fpcalc", "-json", $songFile);
 
     unless (defined $fingerprintJson && length($fingerprintJson) > 0) {
       say "FIXME No output. Is fpcalc having a nap?";
@@ -1398,7 +1532,7 @@ EOF
 
     next if $hasAcoustID;
 
-    say "Fetching AcoustID for $songFile";
+    say "Fetching AcoustID for $displaySongFile";
 
     my $resJson = eval {
       post('https://api.acoustid.org/v2/lookup', [
@@ -1684,6 +1818,7 @@ select LevelId,
        Difficulty,
        IsBanned
   from combined
+ where true
 on CONFLICT DO
 UPDATE
    SET IsBanned = excluded.IsBanned
@@ -1726,6 +1861,7 @@ select LevelId,
        Difficulty,
        IsBanned
   from combined
+ where true
 on CONFLICT DO
 UPDATE
    SET IsBanned = excluded.IsBanned
@@ -2310,7 +2446,7 @@ insert or replace into YURFitData (
 )
 select StartTime,
        SongId,
-       GameMode,
+       coalesce(GameMode, 'Standard'),
        SongDifficultyRank,
        MaximumRatio,
        AnaerobicRatio,
@@ -2355,7 +2491,7 @@ insert into Beatmaps (
 )
 with YURFitDataWeighted as (
 Select SongHash,
-       COALESCE(GameMode, 'Standard') as GameMode,
+       GameMode,
        Difficulty,
        StartTime,
        MaximumRatio,
@@ -2392,6 +2528,7 @@ Select 'custom_level_' || upper(SongHash) as LevelID,
        TotalWeightControlRatio / TotalWeight as WeightControlRatio,
        TotalLowIntensityRatio / TotalWeight as LowIntensityRatio
   from YURFitDataSummed
+ where true
 on CONFLICT DO
 UPDATE
    SET YURFitDataTime = excluded.YURFitDataTime,
@@ -2501,6 +2638,7 @@ CREATE TABLE Beatmaps (
       ELSE Difficulty
     END
   ) VIRTUAL,
+  LeaderboardID INT,
   LastPlayed DATE,
   TopScorePlayed DATE,
   YURFitDataTime DATE,
@@ -2512,6 +2650,7 @@ CREATE TABLE Beatmaps (
   BestAccuracy REAL,
   MyAccuracy REAL,
   PredictedAccuracy REAL,
+  ProjectedAccuracy REAL,
   IsBanned INT,
   LikeFactor REAL,
   SaberSpeed REAL,
@@ -2548,6 +2687,13 @@ myFavouriteLeaderboards as (
 left join Leaderboards Q2
        on Q1.SongHash = Q2.SongHash
 ),
+deletedLevels AS (
+SELECT LeaderboardID
+  FROM DownloadedSongs Q1
+  join Leaderboards Q2
+    on Q1.SongHash = Q2.SongHash
+ WHERE Deleted
+),
 neighbourLeaderboards as (
 SELECT PlayerID,
        LeaderboardID
@@ -2559,17 +2705,31 @@ SELECT Q2.PlayerID
   join neighbourLeaderboards Q2
     on Q1.LeaderboardID = Q2.LeaderboardID
 ),
+deletedCommonLeaderboards as (
+SELECT Q2.PlayerID
+  from deletedLevels Q1
+  join neighbourLeaderboards Q2
+    on Q1.LeaderboardID = Q2.LeaderboardID
+),
 commonLeaderboardCount as (
   SELECT PlayerID,
          count(*) as commonLeaderboardCount
     from commonLeaderboards
 group by PlayerID
 ),
+deletedLeaderboardCount as (
+  SELECT PlayerID,
+         count(*) as deletedLeaderboardCount
+    from deletedCommonLeaderboards
+group by PlayerID
+),
 playersThatLikeSongsWeDo as (
-select PlayerID,
-       commonLeaderboardCount
-  from commonLeaderboardCount
- where commonLeaderboardCount >= 3
+   select Q1.PlayerID,
+          commonLeaderboardCount - COALESCE(deletedLeaderboardCount,0) as commonLeaderboardCount
+     from commonLeaderboardCount Q1
+left join deletedLeaderboardCount Q2
+       on Q1.PlayerID = Q2.PlayerID
+    where (commonLeaderboardCount - COALESCE(deletedLeaderboardCount,0)) >= 3
 ),
 levels2 as (
 select distinct SongHash,
@@ -2681,6 +2841,7 @@ select LevelId,
        Difficulty,
        LikeFactor
   from likeFactor
+ where true
 on CONFLICT DO
 UPDATE
    SET LikeFactor = excluded.LikeFactor
@@ -2931,7 +3092,8 @@ EOF
 sub writeSongsWithoutBeatSaviourStats {
   my $data = $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0];
 with weWantToPlayThisAgain as (
-  select Q1.LevelID,
+  select Q2.SongID,
+         Q1.LevelID,
          GameMode,
          DifficultyText,
          coalesce(MyAccuracy, BestAccuracy) as LastScore
@@ -2947,9 +3109,13 @@ with weWantToPlayThisAgain as (
            Q1.LastPlayed is null
         or YURFitDataTime is null
          )
-     and RecentPlayCount < 10
-     and GameMode not in ('LightShow', 'OneSaber', '360Degree')
-order by coalesce(MyAccuracy, BestAccuracy) desc
+     and (RecentPlayCount is NULL or RecentPlayCount < 10)
+     and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+),
+RowNum as (
+select Q1.*,
+       ROW_NUMBER() OVER (partition by SongID order by LastScore desc) as RowNum
+  from weWantToPlayThisAgain Q1
 )
 select json_object(
          'image',
@@ -2975,7 +3141,9 @@ select json_object(
            )
          )
        )
-  from weWantToPlayThisAgain
+  from RowNum
+ where RowNum = 1
+order by LastScore desc
 EOF
 
   my $target = catfile($PlaylistFolder, 'play-again.bplist');
@@ -2995,15 +3163,15 @@ with toImprove as (
          GameMode,
          DifficultyText,
          MyAccuracy,
-         PredictedAccuracy
+         ProjectedAccuracy
     from Beatmaps Q1
     join Levels Q2
       on Q1.LevelID = Q2.LevelID
-   where PredictedAccuracy > myAccuracy
+   where ProjectedAccuracy > myAccuracy
      and IsDownloaded
      and (IsDeleted is NULL or IsDeleted = FALSE)
-     and GameMode not in ('LightShow', 'OneSaber', '360Degree')
-order by PredictedAccuracy / myAccuracy desc
+     and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+order by ProjectedAccuracy / myAccuracy desc
 )
 select json_object(
          'image',
@@ -3026,8 +3194,8 @@ select json_object(
              ),
              'MyAccuracy',
              MyAccuracy,
-             'PredictedAccuracy',
-             PredictedAccuracy
+             'ProjectedAccuracy',
+             ProjectedAccuracy
            )
          )
        )
@@ -3038,13 +3206,14 @@ EOF
 sub writeNotPlayedSongs {
   write_file(catfile($PlaylistFolder, 'not-played.bplist'), $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
 with ranked as (
-select Q1.LevelID,
+select SongID,
+       Q1.LevelID,
        GameMode,
        DifficultyText,
        PredictedAccuracy,
-       percent_rank() over (order by predictedAccuracy asc nulls last) as accuracyRank,
+       percent_rank() over (order by predictedAccuracy desc) as accuracyRank,
        Q1.LikeFactor,
-       PERCENT_RANK() over (order by Q2.IsFavourite asc, Q1.LikeFactor asc nulls last) as likeRank
+       PERCENT_RANK() over (order by Q2.IsFavourite asc, Q1.LikeFactor asc) as likeRank
   from Beatmaps Q1
   join Levels Q2
     on Q1.LevelID = Q2.LevelID
@@ -3055,19 +3224,26 @@ select Q1.LevelID,
    and PredictedAccuracy is not null
    and Q1.LikeFactor is not null
    and Q1.LastPlayed is null
-   and RecentPlayCount < 10
-   and GameMode not in ('LightShow', 'OneSaber', '360Degree')
-   and PredictedAccuracy >= 0.6
+   and (RecentPlayCount is NULL or RecentPlayCount < 10)
+   and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+   and PredictedAccuracy >= 0.8
 ),
 newSongs as (
-  select LevelID,
+  select SongID,
+         LevelID,
          GameMode,
          DifficultyText,
          PredictedAccuracy,
-         LikeFactor
+         LikeFactor,
+         (accuracyRank + 0.5)
+       * (likeRank + 0.5) as CombinedOrder
     from ranked
-order by (accuracyRank + 0.5)
-       * (likeRank + 0.5) DESC
+),
+RowNum as (
+select Q1.*,
+       ROW_NUMBER() OVER (partition by SongID order by CombinedOrder desc) as RowNum
+  from newSongs Q1
+order by CombinedOrder desc
 )
 select json_object(
          'image',
@@ -3095,58 +3271,50 @@ select json_object(
            )
          )
        )
-  from newSongs
+  from RowNum
+ where RowNum = 1
 EOF
 
   write_file(catfile($PlaylistFolder, 'not-played-hard.bplist'), $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
-with targetAccuracy as (
-select sum(MyAccuracy * AerobicRatio) / sum(AerobicRatio) as targetAccuracy
-  from Beatmaps
- where AerobicRatio is not NULL
-   and MyAccuracy is not null
-),
-OffsetFromTargetAccuracy as (
-select Q1.LevelID,
+with ranked as (
+select SongID,
+       Q1.LevelID,
        GameMode,
        DifficultyText,
        PredictedAccuracy,
-       abs(targetAccuracy - PredictedAccuracy) as OffsetFromTargetAccuracy,
+       percent_rank() over (order by predictedAccuracy desc) as accuracyRank,
        Q1.LikeFactor,
-       Q2.IsFavourite
+       PERCENT_RANK() over (order by Q2.IsFavourite asc, Q1.LikeFactor asc) as likeRank
   from Beatmaps Q1
   join Levels Q2
     on Q1.LevelID = Q2.LevelID
-  join Songs Q4
-    on Q2.SongID = Q4.ID,
-       targetAccuracy Q3
+  join Songs Q3
+    on Q2.SongID = Q3.ID
  where IsDownloaded
    and (IsDeleted is NULL or IsDeleted = FALSE)
    and PredictedAccuracy is not null
    and Q1.LikeFactor is not null
    and Q1.LastPlayed is null
-   and RecentPlayCount < 10
-   and GameMode not in ('LightShow', 'OneSaber', '360Degree')
-   and PredictedAccuracy >= 0.6
-),
-ranked as (
-select LevelID,
-       GameMode,
-       DifficultyText,
-       PredictedAccuracy,
-       percent_rank() over (order by OffsetFromTargetAccuracy desc nulls last) as accuracyRank,
-       LikeFactor,
-       PERCENT_RANK() over (order by IsFavourite asc, LikeFactor asc nulls last) as likeRank
-  from OffsetFromTargetAccuracy
+   and (RecentPlayCount is NULL or RecentPlayCount < 10)
+   and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+   and PredictedAccuracy BETWEEN 0.6 AND 0.8
 ),
 newSongs as (
-  select LevelID,
+  select SongID,
+         LevelID,
          GameMode,
          DifficultyText,
          PredictedAccuracy,
-         LikeFactor
+         LikeFactor,
+         (accuracyRank + 0.5)
+       * (likeRank + 0.5) as CombinedOrder
     from ranked
-order by (accuracyRank + 0.5)
-       * (likeRank + 0.5) DESC
+),
+RowNum as (
+select Q1.*,
+       ROW_NUMBER() OVER (partition by SongID order by CombinedOrder desc) as RowNum
+  from newSongs Q1
+order by CombinedOrder desc
 )
 select json_object(
          'image',
@@ -3174,7 +3342,8 @@ select json_object(
            )
          )
        )
-  from newSongs
+  from RowNum
+ where RowNum = 1
 EOF
 }
 
@@ -3188,6 +3357,7 @@ combined as (
           GameMode,
           MyAccuracy,
           PredictedAccuracy,
+          ProjectedAccuracy,
           julianday('now') - julianday(max(Q1.LastPlayed,TopScorePlayed,YURFitDataTime)) as BeatmapAge,
           julianday('now') - julianday(Q3.LastPlayed) as SongAge,
           SaberSpeed,
@@ -3208,8 +3378,9 @@ combined as (
     where IsDownloaded
       and (IsDeleted is NULL or IsDeleted = FALSE)
       and (IsBanned is NULL or IsBanned = FALSE)
-      and RecentPlayCount < 5
+      and (RecentPlayCount is null or RecentPlayCount < 5)
       and PredictedAccuracy >= 0.6
+      and (ProjectedAccuracy is null or ProjectedAccuracy >= 0.6)
 ),
 calculations as (
 select SongID,
@@ -3221,6 +3392,12 @@ select SongID,
            THEN PredictedAccuracy / MyAccuracy
          ELSE NULL
        END as PotentialImprovement,
+       ProjectedAccuracy,
+       CASE
+         WHEN ProjectedAccuracy > MyAccuracy
+           THEN ProjectedAccuracy / MyAccuracy
+         ELSE NULL
+       END as PotentialImprovement2,
        PredictedAccuracy as PotentialScore,
        BeatmapAge,
        SongAge,
@@ -3251,6 +3428,9 @@ select SongID,
        GameMode,
        PotentialImprovement,
        percent_rank() over (order by PotentialImprovement asc nulls first) as ImprovementRank,
+       ProjectedAccuracy,
+       PotentialImprovement2,
+       percent_rank() over (order by PotentialImprovement2 asc nulls first) as Improvement2Rank,
        PotentialScore,
        percent_rank() over (order by PotentialScore asc nulls first) as PotentialScoreRank,
        BeatmapAge,
@@ -3272,24 +3452,8 @@ select SongID,
        AerobicRatio,
        WeightControlRatio,
        LowIntensityRatio,
-       percent_rank() over (
-         order by AerobicRatio asc nulls first,
-                  WeightControlRatio asc nulls first,
-                  LowIntensityRatio asc nulls first
-       ) as WorkoutRank,
-       percent_rank() over (
-         order by MaximumRatio desc nulls first,
-                  AnaerobicRatio desc nulls first
-       ) as AntiWorkoutRank,
-       percent_rank() over (
-         order by WeightControlRatio asc nulls first,
-                  LowIntensityRatio asc nulls first
-       ) as Workout2Rank,
-       percent_rank() over (
-         order by MaximumRatio desc nulls first,
-                  AnaerobicRatio desc nulls first,
-                  AerobicRatio desc nulls first
-       ) as AntiWorkout2Rank
+       percent_rank() over (order by AerobicRatio asc nulls first) as WorkoutRank,
+       percent_rank() over (order by WeightControlRatio asc nulls first) as Workout2Rank
   from calculations,
        averages
 EOF
@@ -3301,16 +3465,15 @@ sub writeWorkout {
 with CombinedOrder as (
 select Q1.*,
        (ImprovementRank + 0.5)
-       * (SongAgeRank + 0.5)
-       * (BeatmapAgeRank + 0.5)
+       * (Improvement2Rank + 0.5)
        * (WorkoutRank + 0.5)
-       * (AntiWorkoutRank + 0.5)
        * (IsFavourite + 1)
        * (VoteRank)
        * (DurationRank + 0.5) as CombinedOrder
     from WorkoutPlan Q1
    where BeatmapAge is NOT NULL
-     and GameMode not in ('LightShow', 'OneSaber', '360Degree')
+     and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+     and ProjectedAccuracy BETWEEN 0.6 and 0.8
 ),
 RowNum as (
 select Q1.*,
@@ -3381,16 +3544,15 @@ sub writeWorkout2 {
 with CombinedOrder as (
 select Q1.*,
        (ImprovementRank + 0.5)
-       * ((SongAgeRank * 4) + 0.5)
-       * (BeatmapAgeRank + 0.5)
+       * (Improvement2Rank + 0.5)
        * (Workout2Rank + 0.5)
-       * (AntiWorkout2Rank + 0.5)
        * (IsFavourite + 1)
        * (VoteRank)
        * (DurationRank + 0.5) as CombinedOrder
     from WorkoutPlan Q1
    where BeatmapAge is NOT NULL
-     and GameMode not in ('LightShow', 'OneSaber', '360Degree')
+     and GameMode not in ('Lightshow', 'OneSaber', '360Degree')
+     and Q1.ProjectedAccuracy >= 0.8
 ),
 RowNum as (
 select Q1.*,
@@ -3515,99 +3677,89 @@ if (defined $runType) {
     rename($logFileName, catfile($DataDir, "${runType}-prev.txt"));
   }
   
-  open STDOUT, ">>:encoding(UTF-8)", $logFileName;
+  open STDOUT, ">>:encoding(utf8)", $logFileName;
   STDOUT->autoflush(1);
   open STDERR, ">&STDOUT";
 
   createBackup();
 
   say "Starting run at ", ts();
-}
 
-if ($runType eq 'nightly') {
-  fetchScores();
+  if ($runType eq 'nightly') {
+    fetchScores();
 
-  fetchLeaderboards();
-  fetchNeighbours();
-  pruneNeighbours();
+    fetchLeaderboards();
+    fetchNeighbours();
+    pruneNeighbours();
 
-  updatePotentiallyLikedSongs();
+    updatePredictedAccuracy();
+    updateProjectedAccuracy();
+    updatePotentiallyLikedSongs();
 
-  loadDownloadedSongs();
-  fetchBeatsaverData();
-  renameDownloadedSongs();
+    loadDownloadedSongs();
+    fetchBeatsaverData();
+    renameDownloadedSongs();
 
-  updateSongStats();
+    updateSongStats();
 
-  fetchNewSongs();
+    fetchNewSongs();
 
-  getAcoustIDs();
+    mergeSongFiles();
 
-  identifyDuplicateSongs();
-  updateSongStats();
+    getAcoustIDs();
 
-  writeSongsWithoutBeatSaviourStats();
-  writeSongsToImprove();
-  writeNotPlayedSongs();
-  writeWorkout();
-  writeWorkout2();
+    identifyDuplicateSongs();
+    updateSongStats();
 
-  updateSettings();
+    $dbh->do("PRAGMA incremental_vacuum");
+    $dbh->do("PRAGMA optimize");
+  }
 
-  $dbh->do("PRAGMA incremental_vacuum");
-  $dbh->do("PRAGMA optimize");
-}
+  if ($runType eq 'postPlay') {
+    # in case files were deleted.
+    loadDownloadedSongs();
 
-if ($runType eq 'postPlay') {
-  loadFavourites();
-  loadVotedSongs();
+    loadFavourites();
+    loadVotedSongs();
 
-  updatePotentiallyLikedSongs();
+    updatePotentiallyLikedSongs();
 
-  loadBannedSongs();
-  loadDuplicateSongs();
+    loadBannedSongs();
+    loadDuplicateSongs();
 
-  loadBeatSaviorData();
-  pruneBeatSaviorData();
+    loadBeatSaviorData();
+    pruneBeatSaviorData();
 
-  loadYURFitData();
-  pruneYURFitData();
+    loadYURFitData();
+    pruneYURFitData();
 
-  updateSongStats();
+    updatePredictedAccuracy();
+    updateProjectedAccuracy();
 
-  writeSongsWithoutBeatSaviourStats();
-  writeSongsToImprove();
-  writeNotPlayedSongs();
-  writeWorkout();
-  writeWorkout2();
+    updateSongStats();
+  }
 
-  updateSettings();
+  if ($runType eq 'prePlay') {
+    # TODO compose playlist image by tiling first 4 distinct images in playlist.
+    # image is 250 - 600px square, can be .jpg or .png
 
-  # TODO sometimes enable slower/faster mode and then pick difficult/easy beatmaps?
-  # slowerSong -30% score 85% speed
-  # fasterSong +8% score 120% speed
-  # superFastSong 150% speed ? score
-  # PlayerData.dat->{localPlayers}[0]{gameplayModifiers}{songSpeed} = 0 <-- default
-}
+    writeSongsWithoutBeatSaviourStats();
+    writeSongsToImprove();
+    writeNotPlayedSongs();
+    writeWorkout();
+    writeWorkout2();
 
-if (defined $runType) {
+    updateSettings();
+  }
+
   say "Run complete at ", ts();
   createBackup();
-}
+} else {
+  binmode(STDOUT, ":utf8");
+  binmode(STDERR, ":utf8");
 
-if (!defined $runType) {
-  #fetchLeaderboards2();
-  identifyDuplicateSongs();
-  updateSongStats();
-
-  writeSongsWithoutBeatSaviourStats();
-  writeSongsToImprove();
-  writeNotPlayedSongs();
-  writeWorkout();
-  writeWorkout2();
-
-  updateSettings();
-
+  #updateProjectedAccuracy();
+  mergeSongFiles();
 
   exit 0;
 }
