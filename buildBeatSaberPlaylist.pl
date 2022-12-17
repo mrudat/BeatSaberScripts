@@ -26,6 +26,7 @@ use IO::Compress::Gzip qw(gzip Z_BEST_COMPRESSION);
 use File::stat;
 use IPC::System::Simple qw(capturex);
 use Time::Local qw(timelocal_modern);
+#use SQL::Translator::Diff;
 use English qw(-no_match_vars);
 use autodie qw(:all);
 use autodie qw(encode decode decode_json encode_json abs_path catdir catfile updir rel2abs ceil floor strftime round time sleep gzip timelocal_modern);
@@ -108,7 +109,7 @@ $dbh->do("PRAGMA optimize(0x4)");
 HTTP::Cache::Transparent::init({
   BasePath => catdir($CacheDir, "http"),
   MaxAge => 8*24,
-  Verbose => 1,
+#  Verbose => 1,
   NoUpdate => $SECONDS_IN_15_MINUTES,
   ApproveContent => sub { return $_[0]->is_success && length($_[0]->content) > 0 }
 });
@@ -184,7 +185,7 @@ sub get2 {
 
   my $res = $ua->get($url);
   my $elapsed = time() - $then;
-  say "took ${elapsed}s, sleeping for ${elapsed}s";
+  #say "took ${elapsed}s, sleeping for ${elapsed}s";
   sleep($elapsed);
 
   unless ($res->is_success) {
@@ -260,7 +261,7 @@ sub create_or_replace_table {
   # SQLite trims trailing whitespace.
   $sql =~ s/\s+$//s;
 
-  my ($status) = $dbh->selectrow_array(<<'EOF', undef, $name, $sql);
+  my ($status) = $dbh->selectrow_array(<<'SQL', undef, $name, $sql);
 select CASE
           WHEN sql = ?2 THEN 0
           ELSE 1
@@ -268,7 +269,7 @@ select CASE
   from sqlite_schema
  where type = 'table'
    and name = ?1
-EOF
+SQL
 
   if (defined $status && $status == 1) {
     $dbh->do("DROP TABLE $name");
@@ -289,7 +290,7 @@ sub create_view {
   # SQLite trims trailing whitespace.
   $sql =~ s/\s+$//s;
 
-  my ($status) = $dbh->selectrow_array(<<'EOF', undef, $name, $sql);
+  my ($status) = $dbh->selectrow_array(<<'SQL', undef, $name, $sql);
 select CASE
           WHEN sql = ?2 THEN 0
           ELSE 1
@@ -297,7 +298,7 @@ select CASE
   from sqlite_schema
  where type = 'view'
    and name = ?1
-EOF
+SQL
 
   if (defined $status && $status == 1) {
     $dbh->do("DROP VIEW $name");
@@ -308,7 +309,7 @@ EOF
   }
 }
 
-create_or_replace_table(<<'EOF');
+create_or_replace_table(<<'SQL');
 CREATE TABLE Leaderboards (
   LeaderBoardID INTEGER PRIMARY KEY,
   SongHash TEXT,
@@ -318,15 +319,15 @@ CREATE TABLE Leaderboards (
   MaxScore INTEGER,
   Data TEXT
 )
-EOF
+SQL
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE INDEX IF NOT EXISTS Leaderboards_SongHash on Leaderboards (
   SongHash
 )
-EOF
+SQL
 
-create_or_replace_table(<<'EOF');
+create_or_replace_table(<<'SQL');
 CREATE TABLE MyScoreSaberScores (
   ScoreID INTEGER PRIMARY KEY,
   LeaderBoardID INTEGER,
@@ -335,13 +336,13 @@ CREATE TABLE MyScoreSaberScores (
   TimeSet INTEGER,
   Data TEXT
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS MyScoreSaberScores_LeaderboardID ON MyScoreSaberScores (
   LeaderboardID
 )
-EOF
+SQL
 
 sub fetchScores {
   my $baseUrl = "https://scoresaber.com/api/player/${PlayerID}/scores?sort=recent";
@@ -360,7 +361,7 @@ sub fetchScores {
 
   undef $meta;
 
-  my $recordLeaderboard = $dbh->prepare(<<'EOF');
+  my $recordLeaderboard = $dbh->prepare(<<'SQL');
 with playerScores as (
   SELECT value as playerScore
     from json_each(json(?), '$.playerScores')
@@ -373,9 +374,9 @@ select json_extract(playerScore, '$.leaderboard.id'),
        json_extract(playerScore, '$.leaderboard.maxScore'),
        json_extract(playerScore, '$.leaderboard')
   from playerScores
-EOF
+SQL
 
-  my $recordScore = $dbh->prepare(<<'EOF');
+  my $recordScore = $dbh->prepare(<<'SQL');
 with playerScores as (
   SELECT value as playerScore
     from json_each(json(?), '$.playerScores')
@@ -388,7 +389,7 @@ select json_extract(playerScore, '$.score.id'),
        unixepoch(json_extract(playerScore, '$.score.timeSet')),
        json_extract(playerScore, '$.score')
   from playerScores
-EOF
+SQL
 
   while (1) {
     $recordLeaderboard->execute($res);
@@ -400,7 +401,7 @@ EOF
     $res = get($baseUrl . "&page=$page");
   }
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelId,
   GameMode,
@@ -440,10 +441,10 @@ UPDATE
        LeaderboardID = excluded.LeaderboardID
  where TopScorePlayed is null
     or TopScorePlayed <> excluded.TopScorePlayed
-EOF
+SQL
 }
 
-create_or_replace_table(<<'EOF');
+create_or_replace_table(<<'SQL');
 CREATE TABLE TheirScoreSaberScores (
   ScoreID INTEGER PRIMARY KEY,
   PlayerID INTEGER,
@@ -452,22 +453,22 @@ CREATE TABLE TheirScoreSaberScores (
   TimeSet INTEGER,
   Data TEXT
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS TheirScoreSaberScores_LeaderboardID ON TheirScoreSaberScores (
   LeaderboardID,
   PlayerID
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS TheirScoreSaberScores_PlayerID ON TheirScoreSaberScores (
   PlayerID
 )
-EOF
+SQL
 
-create_view(<<'EOF');
+create_view(<<'SQL');
 CREATE VIEW NeighboursByScore AS
 With scoreRatios as (
 SELECT Q2.PlayerID,
@@ -488,10 +489,10 @@ group by PlayerID
      from counted
     where commonLeaderboardCount >= 3
 
-EOF
+SQL
 
 sub fetchLeaderboards {
-  my $recordScores = $dbh->prepare(<<'EOF');
+  my $recordScores = $dbh->prepare(<<'SQL');
 with scores as (
   SELECT value as score
     from json_each(json(?1), '$.scores')
@@ -511,14 +512,14 @@ update
        TimeSet = excluded.TimeSet,
        Data = excluded.Data
  where BaseScore <> excluded.BaseScore
-EOF
+SQL
 
-  my $countNeighbours = $dbh->prepare(<<'EOF');
+  my $countNeighbours = $dbh->prepare(<<'SQL');
   select count(*)
     from NeighboursByScore
-EOF
+SQL
 
-  my $getScoresBelowCutoff = $dbh->prepare(<<'EOF');
+  my $getScoresBelowCutoff = $dbh->prepare(<<'SQL');
 with scores as (
   SELECT value as score
     from json_each(json(?1), '$.scores')
@@ -535,18 +536,18 @@ filtered as (
 select count(*)
   from filtered
  where score <= cast(?2 as integer)
-EOF
+SQL
 
   my $itemsPerPage = 12;
 
   my $checkItemsPerPage = 1;
 
-  my $leaderboards = $dbh->selectall_arrayref(<<'EOF');
+  my $leaderboards = $dbh->selectall_arrayref(<<'SQL');
   select LeaderboardID,
          BaseScore,
          Rank
     from MyScoreSaberScores
-EOF
+SQL
 
   my $nextLeaderboards;
 
@@ -613,7 +614,7 @@ EOF
 }
 
 sub fetchNeighbours {
-  my $findNeighbours = $dbh->prepare(<<'EOF');
+  my $findNeighbours = $dbh->prepare(<<'SQL');
 With scoreRatios as (
 SELECT Q2.PlayerID,
        abs((Q2.BaseScore / cast(Q1.BaseScore as real)) - 1) as scoreRatio,
@@ -636,9 +637,9 @@ group by PlayerID
     where commonLeaderboardCount >= 3
  order by commonLeaderboardCount DESC,
           TimeSet asc
-EOF
+SQL
 
-  my $recordLeaderboard = $dbh->prepare(<<'EOF');
+  my $recordLeaderboard = $dbh->prepare(<<'SQL');
 with playerScores as (
   SELECT value as playerScore
     from json_each(json(?), '$.playerScores')
@@ -651,9 +652,9 @@ select json_extract(playerScore, '$.leaderboard.id'),
        json_extract(playerScore, '$.leaderboard.maxScore'),
        json_extract(playerScore, '$.leaderboard')
   from playerScores
-EOF
+SQL
 
-  my $recordScore = $dbh->prepare(<<'EOF');
+  my $recordScore = $dbh->prepare(<<'SQL');
 with playerScores as (
   SELECT value as playerScore
     from json_each(json(?1), '$.playerScores')
@@ -673,13 +674,13 @@ update
        TimeSet = excluded.TimeSet,
        Data = excluded.Data
  where BaseScore <> excluded.BaseScore
-EOF
+SQL
 
-  my $countPlayerScores = $dbh->prepare(<<'EOF');
+  my $countPlayerScores = $dbh->prepare(<<'SQL');
 select count(*)
   from TheirScoreSaberScores
  where PlayerID = ?
-EOF
+SQL
 
   $findNeighbours->execute();
 
@@ -737,7 +738,7 @@ EOF
 }
 
 sub updatePredictedAccuracy {
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 insert into Beatmaps (
   LevelID,
   GameMode,
@@ -810,12 +811,12 @@ select LevelID,
 on CONFLICT DO
 UPDATE
    SET PredictedAccuracy = excluded.PredictedAccuracy
-EOF
+SQL
 }
 
 sub updateProjectedAccuracy {
   # project new score from trends of changing score over time
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 with a as (
   select Q2.LeaderBoardID,
          FileDate,
@@ -964,11 +965,11 @@ Update Beatmaps as Q1
    set ProjectedAccuracy = Q2.ProjectedAccuracy
   from ProjectedAccuracy as Q2
  where Q1.rowid = Q2.BeatmapID
-EOF
+SQL
 }
 
 sub pruneNeighbours {
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 With myScores as (
 SELECT LeaderboardID,
        BaseScore as myScore
@@ -1016,10 +1017,10 @@ delete
               select PlayerID
                 from potentialVictims
                    )
-EOF
+SQL
 }
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS DownloadedSongs (
   SongHash TEXT PRIMARY KEY,
   SongDir TEXT,
@@ -1028,37 +1029,37 @@ CREATE TABLE IF NOT EXISTS DownloadedSongs (
   Duration INTEGER GENERATED ALWAYS AS (json_extract(BeatSaverData, '$.metadata.duration')) virtual,
   FingerprintID INTEGER
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE UNIQUE INDEX IF NOT EXISTS DownloadedSongs_SongDir ON DownloadedSongs (
   SongDir
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE TEMPORARY TABLE SeenSongs (
   SongDir TEXT,
   SongHash TEXT
 )
-EOF
+SQL
 
 sub loadDownloadedSongs {
-  my $getHaveHash = $dbh->prepare(<<'EOF');
+  my $getHaveHash = $dbh->prepare(<<'SQL');
 select count(*)
   from DownloadedSongs
  where SongDir = ?
-EOF
+SQL
 
-  my $recordHash = $dbh->prepare(<<'EOF');
+  my $recordHash = $dbh->prepare(<<'SQL');
 INSERT INTO SeenSongs (SongHash, SongDir)
 VALUES (?, ?)
-EOF
+SQL
 
-  my $recordSeen = $dbh->prepare(<<'EOF');
+  my $recordSeen = $dbh->prepare(<<'SQL');
 INSERT INTO SeenSongs (SongDir)
 VALUES (?)
-EOF
+SQL
 
   my $digest = Digest::SHA->new(1);
 
@@ -1122,7 +1123,7 @@ EOF
 
   closedir($dh);
 
-  foreach my $row (@{$dbh->selectall_arrayref(<<'EOF')}) {
+  foreach my $row (@{$dbh->selectall_arrayref(<<'SQL')}) {
 With Hashes as (
    SELECT COALESCE(Q1.SongHash, Q2.SongHash) as SongHash,
           Q1.SongDir
@@ -1141,7 +1142,7 @@ SELECT SongHash,
        SongDirs
   FROM Counted
  WHERE SongCount > 1
-EOF
+SQL
     my ($songHash, $songDir) = @{$row};
 
     say "Found duplicate $songHash";
@@ -1163,38 +1164,38 @@ EOF
     print "\n";
   }
 
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 INSERT INTO DownloadedSongs (SongHash, SongDir)
    SELECT SongHash, SongDir
      FROM SeenSongs
  GROUP BY SongHash
 ON CONFLICT(SongHash) DO UPDATE SET SongDir = excluded.SongDir
 ON CONFLICT(SongDir) DO NOTHING
-EOF
+SQL
 
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 UPDATE DownloadedSongs as Q1
    SET Deleted = 1 - (
   SELECT COUNT(*)
     FROM SeenSongs Q2
    WHERE Q1.SongDir = Q2.SongDir
    )
-EOF
+SQL
 }
 
 sub fetchBeatsaverData {
-  my $hashesToFetch = $dbh->prepare(<<'EOF');
+  my $hashesToFetch = $dbh->prepare(<<'SQL');
 SELECT SongHash
   From DownloadedSongs
  Where Deleted = FALSE
    and BeatSaverData is NULL
-EOF
+SQL
 
-  my $storeData = $dbh->prepare(<<'EOF');
+  my $storeData = $dbh->prepare(<<'SQL');
 UPDATE DownloadedSongs
    SET BeatSaverData = json(?2)
  WHERE SongHash = ?1
-EOF
+SQL
 
   $hashesToFetch->execute();
 
@@ -1215,7 +1216,7 @@ EOF
 }
 
 sub renameDownloadedSongs {
-  my $namesToFix = $dbh->prepare(<<'EOF');
+  my $namesToFix = $dbh->prepare(<<'SQL');
 with MapNames as (
 select SongDir,
        json_extract(BeatSaverData, '$.id') || ' (' || json_extract(BeatSaverData, '$.metadata.songName') || ' - ' || json_extract(BeatSaverData, '$.metadata.levelAuthorName') || ')' as MapName
@@ -1226,7 +1227,7 @@ select SongDir,
 select SongDir, MapName
   from MapNames
  where SongDir <> MapName
-EOF
+SQL
 
   $namesToFix->execute();
   while (my ($songDir, $mapName) = $namesToFix->fetchrow_array()) {
@@ -1249,7 +1250,7 @@ EOF
 }
 
 sub fetchNewSongs {
-  my $songsToDownload = $dbh->prepare(<<'EOF');
+  my $songsToDownload = $dbh->prepare(<<'SQL');
   select Hash
     from Levels
    where Hash is not null
@@ -1261,12 +1262,12 @@ sub fetchNewSongs {
      where PredictedAccuracy > 0.6
      )
 order by LikeFactor desc
-EOF
+SQL
 
-  my $recordDownload = $dbh->prepare(<<'EOF');
+  my $recordDownload = $dbh->prepare(<<'SQL');
 INSERT OR REPLACE INTO DownloadedSongs (SongHash, SongDir, BeatSaverData, Deleted)
 VALUES (?, ?, json(?), 0)
-EOF
+SQL
 
   $songsToDownload->execute();
 
@@ -1339,7 +1340,7 @@ EOF
     last if $downloadedCount >= 10;
   }
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Levels (
   LevelId,
   IsDownloaded,
@@ -1357,7 +1358,7 @@ UPDATE
    SET IsDownloaded = excluded.IsDownloaded,
        IsDeleted = excluded.IsDeleted,
        Duration = excluded.Duration
-EOF
+SQL
 }
 
 sub mergeSongFiles {
@@ -1441,30 +1442,30 @@ sub mergeSongFiles {
   closedir $musicDh;
 }
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS AcoustIDs (
   ID INTEGER PRIMARY KEY,
   Fingerprint TEXT,
   AcoustID TEXT,
   LastFetchDate REAL
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE UNIQUE INDEX IF NOT EXISTS AcoustIDs_AK ON AcoustIDs (
   Fingerprint
 )
-EOF
+SQL
 
 sub getAcoustIDs {
-  my $needFingerprint = $dbh->prepare(<<EOF);
+  my $needFingerprint = $dbh->prepare(<<SQL);
 select rowid, SongDir
   from DownloadedSongs
  where FingerprintID is NULL
    and not Deleted
-EOF
+SQL
 
-  my $registerFingerprint = $dbh->prepare(<<EOF);
+  my $registerFingerprint = $dbh->prepare(<<SQL);
 insert into AcoustIDs (Fingerprint)
 values (json(?1))
 on conflict do
@@ -1472,26 +1473,26 @@ update
    set LastFetchDate = LastFetchDate 
 returning ID,
           AcoustID is not null
-EOF
+SQL
 
-  my $recordFingerprint = $dbh->prepare(<<EOF);
+  my $recordFingerprint = $dbh->prepare(<<SQL);
 update DownloadedSongs
    set FingerprintID = ?2
  where rowid = ?1
-EOF
+SQL
 
-  my $recordAcoustID = $dbh->prepare(<<EOF);
+  my $recordAcoustID = $dbh->prepare(<<SQL);
 update AcoustIDs
   set AcoustID = json(?2),
       LastFetchDate = julianday('now')
 where ID = ?1
-EOF
+SQL
 
-  my $recordFailure = $dbh->prepare(<<EOF);
+  my $recordFailure = $dbh->prepare(<<SQL);
 update AcoustIDs
   set LastFetchDate = julianday('now')
 where ID = ?1
-EOF
+SQL
 
   $needFingerprint->execute();
 
@@ -1563,7 +1564,7 @@ EOF
     $recordAcoustID->execute($fingerprintID, $resJson);
   }
 
-  my $needAcoustId = $dbh->prepare(<<'EOF');
+  my $needAcoustId = $dbh->prepare(<<'SQL');
 select ID,
        Fingerprint
   from AcoustIDs
@@ -1572,7 +1573,7 @@ select ID,
          json_array_length(AcoustID, '$.results') = 0
      and LastFetchDate < JULIANDAY('now') - 30
        )
-EOF
+SQL
 
   $needAcoustId->execute();
 
@@ -1609,19 +1610,19 @@ EOF
   }
 }
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS PlayerData (
   ID integer primary key,
   PlayerData TEXT
 )
-EOF
+SQL
 
-create_view(<<EOF);
+create_view(<<SQL);
 CREATE VIEW FavouriteLevels AS
 select value as LevelId
   from PlayerData,
        json_each(PlayerData, '\$.localPlayers[0].favoritesLevelIds')
-EOF
+SQL
 
 sub loadFavourites {
   my $playerDataFile = catfile($BeatSaberAppdataFolder, "PlayerData.dat");
@@ -1632,7 +1633,7 @@ sub loadFavourites {
 
   $dbh->do("insert or replace into PlayerData (id, PlayerData) values (1, json(?))", undef, read_file($playerDataFile));
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 Insert into Levels (
   LevelId,
   IsFavourite
@@ -1644,51 +1645,51 @@ SELECT LevelId,
 on CONFLICT DO
 UPDATE
    SET IsFavourite = TRUE
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 update Levels
    set IsFavourite = FALSE
  where LevelID not in (
   select LevelID
     from FavouriteLevels
  )
-EOF
+SQL
 }
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS VotedSongs (
   SongHash Text primary key,
   VoteType TEXT
 )
-EOF
+SQL
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS VotedSongsFiles (
   VersionName Text primary key,
   LastModified TIMESTAMP
 )
-EOF
+SQL
 
 sub loadVotedSongs {
-  my $getLastModified = $dbh->prepare(<<'EOF');
+  my $getLastModified = $dbh->prepare(<<'SQL');
 select LastModified
   from VotedSongsFiles
  where versionName = ?
-EOF
+SQL
 
-  my $applyVotes = $dbh->prepare(<<'EOF');
+  my $applyVotes = $dbh->prepare(<<'SQL');
 insert or replace into VotedSongs (SongHash, VoteType)
 select key as SongHash,
        json_extract(value, '$.voteType') as VoteType
   from json_each(json(?))
  where json_extract(value, '$.hash') = key
-EOF
+SQL
 
-  my $saveLastModified = $dbh->prepare(<<'EOF');
+  my $saveLastModified = $dbh->prepare(<<'SQL');
 insert or replace into VotedSongsFiles (VersionName, LastModified)
 values (?, ?)
-EOF
+SQL
 
   my @votedFiles;
 
@@ -1723,7 +1724,7 @@ EOF
     $applyVotes->execute($data);
   }
 
-  my $data = $dbh->selectall_arrayref(<<'EOF')->[0][0];
+  my $data = $dbh->selectall_arrayref(<<'SQL')->[0][0];
 select json_group_object(
          SongHash,
          json_object(
@@ -1734,7 +1735,7 @@ select json_group_object(
          )
        )
   from VotedSongs
-EOF
+SQL
 
   foreach my $row (@votedFiles) {
     my ($versionName, $votedFile, $oldLastModified, $bom) = @$row;
@@ -1750,7 +1751,7 @@ EOF
     $saveLastModified->execute($versionName, $lastModified);
   }
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Levels (
   LevelId,
   Vote
@@ -1765,27 +1766,27 @@ select 'custom_level_' || upper(SongHash) as LevelId,
 on CONFLICT DO
 UPDATE
    SET Vote = excluded.Vote
-EOF
+SQL
 }
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS BannedSongs (
   LevelID TEXT,
   GameMode TEXT,
   Difficulty TEXT,
   PRIMARY KEY (LevelID, GameMode, Difficulty)
 )
-EOF
+SQL
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS BannedSongsFile (
   ID INTEGER PRIMARY KEY,
   LastModified TIMESTAMP
 )
-EOF
+SQL
 
 sub markBeatmapsBanned {
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelID,
   GameMode,
@@ -1824,9 +1825,9 @@ UPDATE
    SET IsBanned = excluded.IsBanned
  where IsBanned is null
     or IsBanned <> excluded.IsBanned
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelID,
   GameMode,
@@ -1867,7 +1868,7 @@ UPDATE
    SET IsBanned = excluded.IsBanned
  where IsBanned is null
     or IsBanned <> excluded.IsBanned
-EOF
+SQL
 }
 
 sub loadBannedSongs {
@@ -1880,10 +1881,10 @@ sub loadBannedSongs {
     return;
   }
 
-  my $lastModified = $dbh->selectall_arrayref(<<'EOF')->[0][0];
+  my $lastModified = $dbh->selectall_arrayref(<<'SQL')->[0][0];
 select LastModified
   from BannedSongsFile
-EOF
+SQL
 
   if ($lastModified && $lastModified == $stat->mtime) {
     markBeatmapsBanned();
@@ -1897,7 +1898,7 @@ EOF
 
     $dbh->do('delete from BannedSongs');
 
-    $dbh->do(<<'EOF', undef, scalar read_file($bannedSongsFile));
+    $dbh->do(<<'SQL', undef, scalar read_file($bannedSongsFile));
 insert into BannedSongs (LevelID, GameMode, Difficulty)
 with songs as (
 select value as song
@@ -1908,7 +1909,7 @@ select distinct json_extract(song, '$.levelid') as levelid,
        json_extract(value, '$.name') as Difficulty
   from songs,
       json_each(song, '$.difficulties')
-EOF
+SQL
   };
   if ($EVAL_ERROR) {
     warn $EVAL_ERROR;
@@ -1926,7 +1927,7 @@ EOF
 sub saveBannedSongs {
   my ($bannedSongsFile) = @_;
 
-  write_file($bannedSongsFile, $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
+  write_file($bannedSongsFile, $dbh->selectall_arrayref(<<'SQL', undef, $0)->[0][0]);
 with grouped as (
   SELECT LevelID,
          json_group_array(
@@ -1970,36 +1971,36 @@ select json_object(
          json_group_array(json(object))
        )
   from objects
-EOF
+SQL
 
   my $stat = stat $bannedSongsFile;
 
-  my $saveLastModified = $dbh->do(<<'EOF', undef, $stat->mtime);
+  my $saveLastModified = $dbh->do(<<'SQL', undef, $stat->mtime);
 insert or replace into BannedSongsFile (ID, LastModified)
 values (1, ?)
-EOF
+SQL
 }
 
-create_or_replace_table(<<'EOF');
+create_or_replace_table(<<'SQL');
 CREATE TABLE DuplicateSongs (
   FileName TEXT PRIMARY KEY,
   LastModifiedTime INT,
   LevelIDs TEXT,
   Seen INT
 )
-EOF
+SQL
 
 sub loadDuplicateSongs {
   my $duplicatesFolder = catdir($PlaylistFolder, 'Duplicates');
 
-  my $getLastModified = $dbh->prepare(<<EOF);
+  my $getLastModified = $dbh->prepare(<<SQL);
    update DuplicateSongs
       set Seen = TRUE
     where FileName = ?
 returning LastModifiedTime
-EOF
+SQL
 
-  my $recordDuplicates = $dbh->prepare(<<'EOF');
+  my $recordDuplicates = $dbh->prepare(<<'SQL');
 insert or replace into DuplicateSongs (FileName, LastModifiedTime, LevelIDs, Seen)
 with songs as (
 select value as song
@@ -2014,12 +2015,12 @@ select ?1,
        json_group_array(distinct LevelID),
        TRUE
   from levelIDs
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 update DuplicateSongs
    set Seen = FALSE
-EOF
+SQL
 
   opendir(my $dh, $duplicatesFolder);
 
@@ -2043,7 +2044,7 @@ EOF
   closedir $dh;
 }
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS BeatSaviourData (
   FileDate JulianDate,
   RecordNumber INTEGER,
@@ -2060,40 +2061,40 @@ CREATE TABLE IF NOT EXISTS BeatSaviourData (
   SongDuration INTEGER GENERATED ALWAYS AS (json_extract(Data, '$.songDuration')) VIRTUAL,
   PRIMARY KEY (FileDate, RecordNumber)
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS BeatSaviourDataIndex1 ON BeatSaviourData (
   SongId,
   GameMode,
   SongDifficultyRank,
   FileDate ASC
 )
-EOF
+SQL
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS BeatSaviourDataFiles (
   FileDate JulianDate primary key,
   LastModified TIMESTAMP
 )
-EOF
+SQL
 
 sub loadBeatSaviorData {
-  my $recordBeatSaviourData = $dbh->prepare(<<'EOF');
+  my $recordBeatSaviourData = $dbh->prepare(<<'SQL');
 insert or replace into BeatSaviourData (FileDate, RecordNumber, Data)
 values (julianday(?), ?, json_remove(json(?),'$.deepTrackers'))
-EOF
+SQL
 
-  my $getLastModified = $dbh->prepare(<<'EOF');
+  my $getLastModified = $dbh->prepare(<<'SQL');
 select LastModified
   from BeatSaviourDataFiles
  where FileDate = julianday(?)
-EOF
+SQL
 
-  my $saveLastModified = $dbh->prepare(<<'EOF');
+  my $saveLastModified = $dbh->prepare(<<'SQL');
 insert or replace into BeatSaviourDataFiles (FileDate, LastModified)
 values (julianday(?), ?)
-EOF
+SQL
 
   my ($updateBeatmaps) = 0;
 
@@ -2145,17 +2146,17 @@ EOF
   closedir $dh;
 
   if (!$updateBeatmaps) {
-    my ($hasData) = $dbh->selectrow_array(<<EOF);
+    my ($hasData) = $dbh->selectrow_array(<<SQL);
 select TRUE
   from Beatmaps
  where LastPlayed is not null
  limit 1
-EOF
+SQL
     $updateBeatmaps = !$hasData;
   }
 
   if ($updateBeatmaps) {
-    $dbh->do(<<EOF);
+    $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelId,
   GameMode,
@@ -2208,12 +2209,12 @@ UPDATE
        Duration   = excluded.Duration
  where LastPlayed is null
     or LastPlayed <> excluded.LastPlayed
-EOF
+SQL
   }
 }
 
 sub pruneBeatSaviorData {
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 WITH Numbered AS (
 Select ROWID,
        ROW_NUMBER() OVER (PARTITION BY SongId, GameMode, SongDifficultyRank order by FileDate desc) as ROW_NUM
@@ -2225,11 +2226,11 @@ DELETE FROM BeatSaviourData
             from Numbered
            where row_num > 30
                 )
-EOF
+SQL
 
   # beat saviour data keeps the last 30 files.
   # perhaps we should only prune this if the file was not found?
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 with Numbered as (
 select ROWID,
        ROW_NUMBER() over (order by fileDate desc) as row_num
@@ -2241,10 +2242,10 @@ delete from BeatSaviourDataFiles
              from Numbered
             where row_num > 30
                 )
-EOF
+SQL
 }
 
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 CREATE TABLE IF NOT EXISTS YURFitData (
   StartTime DATE,
   SongHash TEXT,
@@ -2257,17 +2258,17 @@ CREATE TABLE IF NOT EXISTS YURFitData (
   LowIntensityRatio NUMBER,
   PRIMARY KEY(StartTime, SongHash, GameMode, Difficulty)
 )
-EOF
+SQL
 
-$dbh->do(<<EOF);
+$dbh->do(<<SQL);
 CREATE TABLE IF NOT EXISTS YURFitFiles (
   FileDate DATE primary key,
   LastModified TIMESTAMP
 )
-EOF
+SQL
 
 sub loadYURFitData {
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 CREATE TEMPORARY TABLE YURFitTemp (
   FileDate DATE,
   StartTime DATE,
@@ -2280,20 +2281,20 @@ CREATE TEMPORARY TABLE YURFitTemp (
   LowIntensityRatio NUMBER,
   PRIMARY KEY(StartTime, SongName, Difficulty)
 )
-EOF
+SQL
 
-  my $getLastModified = $dbh->prepare(<<'EOF');
+  my $getLastModified = $dbh->prepare(<<'SQL');
 select LastModified
   from YURFitFiles
  where FileDate = julianday(?)
-EOF
+SQL
 
-  my $saveLastModified = $dbh->prepare(<<'EOF');
+  my $saveLastModified = $dbh->prepare(<<'SQL');
 insert or replace into YURFitFiles (FileDate, LastModified)
 values (julianday(?), ?)
-EOF
+SQL
 
-  my $recordBPM = $dbh->prepare(<<'EOF');
+  my $recordBPM = $dbh->prepare(<<'SQL');
 INSERT OR REPLACE INTO YURFitTemp (
   FileDate,
   StartTime,
@@ -2319,7 +2320,7 @@ Values (
   ?8,
   ?9
 )
-EOF
+SQL
 
   my $logDir = catdir($YURFitAppdataFolder, "logs");
 
@@ -2432,7 +2433,7 @@ EOF
       }
     }
 
-    $dbh->do(<<'EOF');
+    $dbh->do(<<'SQL');
 insert or replace into YURFitData (
   StartTime,
   SongHash,
@@ -2458,7 +2459,7 @@ select StartTime,
     on Q1.FileDate = Q2.FileDate 
    and Q1.SongName = json_extract(Data, '$.songName')
    and lower(Q1.Difficulty) = json_extract(Data, '$.songDifficulty')
-EOF
+SQL
 
     $saveLastModified->execute($fileDate, $lastModified);
 
@@ -2467,17 +2468,17 @@ EOF
   closedir $dh;
 
   if (!$updateBeatmaps) {
-    my ($hasData) = $dbh->selectrow_array(<<EOF);
+    my ($hasData) = $dbh->selectrow_array(<<SQL);
 select TRUE
   from Beatmaps
  where YURFitDataTime is not null
  limit 1
-EOF
+SQL
     $updateBeatmaps = !$hasData;
   }
 
   if ($updateBeatmaps) {
-    $dbh->do(<<EOF);
+    $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelID,
   GameMode,
@@ -2539,13 +2540,13 @@ UPDATE
        LowIntensityRatio = excluded.LowIntensityRatio
  where YURFitDataTime is null
     or YURFitDataTime <> excluded.YURFitDataTime
-EOF
+SQL
   }
 
 }
 
 sub pruneYURFitData {
-  $dbh->do(<<'EOF');
+  $dbh->do(<<'SQL');
 WITH Numbered AS (
 Select ROWID,
        ROW_NUMBER() OVER (PARTITION BY SongHash, GameMode, Difficulty order by StartTime desc) as ROW_NUM
@@ -2557,9 +2558,9 @@ DELETE FROM YURFitData
             from Numbered
            where row_num > 30
                 )
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 with Numbered as (
 select ROWID,
        ROW_NUMBER() over (order by fileDate desc) as row_num
@@ -2571,19 +2572,19 @@ delete from YURFitFiles
              from Numbered
             where row_num > 31
                 )
-EOF
+SQL
 }
 
-create_or_replace_table(<<EOF);
+create_or_replace_table(<<SQL);
 CREATE TABLE Songs (
   ID INT primary key,
   LastPlayed DATE,
   IsFavourite INT,
   RecentPlayCount INT
 )
-EOF
+SQL
 
-create_or_replace_table(<<EOF);
+create_or_replace_table(<<SQL);
 CREATE TABLE Levels (
   LevelID TEXT CHECK (CASE WHEN LevelID LIKE 'custom_level_%' THEN substr(LevelID,14) = upper(substr(LevelID,14)) ELSE TRUE END) primary key not null,
   Hash TEXT GENERATED ALWAYS AS (
@@ -2601,22 +2602,22 @@ CREATE TABLE Levels (
   IsDeleted INT,
   LikeFactor REAL
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS Levels_CanPlay ON Levels (
   IsDownloaded,
   IsDeleted
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS Levels_SongID ON Levels (
   SongID
 )
-EOF
+SQL
 
-create_or_replace_table(<<EOF);
+create_or_replace_table(<<SQL);
 CREATE TABLE Beatmaps (
   LevelID TEXT CHECK (CASE WHEN LevelID LIKE 'custom_level_%' THEN substr(LevelID,14) = upper(substr(LevelID,14)) ELSE TRUE END),
   Hash TEXT GENERATED ALWAYS AS (
@@ -2658,16 +2659,16 @@ CREATE TABLE Beatmaps (
   Duration REAL,
   PRIMARY KEY (LevelID, GameMode, Difficulty)
 )
-EOF
+SQL
 
-$dbh->do(<<'EOF');
+$dbh->do(<<'SQL');
 CREATE INDEX IF NOT EXISTS Beatmaps_IsBanned ON Beatmaps (
   IsBanned
 )
-EOF
+SQL
 
 sub updatePotentiallyLikedSongs {
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Levels (
   LevelId,
   LikeFactor
@@ -2759,9 +2760,9 @@ select 'custom_level_' || upper(SongHash) as LevelId,
 on CONFLICT DO
 UPDATE
    SET LikeFactor = excluded.LikeFactor
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert into Beatmaps (
   LevelID,
   GameMode,
@@ -2845,18 +2846,18 @@ select LevelId,
 on CONFLICT DO
 UPDATE
    SET LikeFactor = excluded.LikeFactor
-EOF
+SQL
 }
 
 sub identifyDuplicateSongs {
   say "merging duplicate songs at ", ts();
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 update Levels
    set SongID = rowid
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 with a as (
 select Q1.rowid,
        SongID,
@@ -2883,9 +2884,9 @@ update Levels as Q3
    where SongID <> MinSongID
        ) as Q4
  where Q3.rowid = Q4.rowid
-EOF
+SQL
 
-  my ($mergeAcoustIDs) = $dbh->prepare(<<'EOF');
+  my ($mergeAcoustIDs) = $dbh->prepare(<<'SQL');
 with IDs as (
 select SongID,
        json_extract (results.value, '$.id') acoustID
@@ -2924,11 +2925,11 @@ update Levels as Q1
    where SongID <> MinSongID
        ) as Q2
  where Q1.SongID = Q2.SongID
-EOF
+SQL
 
   while ($mergeAcoustIDs->execute() > 0) { };
 
-  my ($mergeRecordingIDs) = $dbh->prepare(<<'EOF');
+  my ($mergeRecordingIDs) = $dbh->prepare(<<'SQL');
 with IDs as (
 select SongID,
        json_extract (results.value, '$.id') acoustID,
@@ -2969,11 +2970,11 @@ update Levels as Q1
    where SongID <> MinSongID
        ) as Q2
  where Q1.SongID = Q2.SongID
-EOF
+SQL
 
   while ($mergeRecordingIDs->execute() > 0) { };
 
-  my ($mergeDuplicateSongs) = $dbh->prepare(<<'EOF');
+  my ($mergeDuplicateSongs) = $dbh->prepare(<<'SQL');
 with duplicates as (
 select ds.rowid as DuplicateID,
        foo.value as LevelID
@@ -3007,7 +3008,7 @@ update Levels as Q1
    where SongID <> MinSongID
        ) as Q2
  where Q1.SongID = Q2.SongID
-EOF
+SQL
 
   while ($mergeDuplicateSongs->execute() > 0) { };
 
@@ -3015,7 +3016,7 @@ EOF
 }
 
 sub updateSongStats {
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 insert or replace into Songs (ID, LastPlayed, IsFavourite)
 With sigh as (
   select LevelID,
@@ -3041,9 +3042,9 @@ select LevelID,
     join LastPlayed Q2
       on Q1.LevelID = Q2.LevelID 
 group by SongID
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 with a as (
   select Q2.SongID,
          count(*) as bsdCount
@@ -3075,9 +3076,9 @@ update Songs as Q1
       on a.SongID = b.SongID
        ) as Q2
  where Q1.ID = Q2.SongID
-EOF
+SQL
 
-  $dbh->do(<<EOF);
+  $dbh->do(<<SQL);
 delete from Songs
  where ID in (
         select Q1.ID
@@ -3086,11 +3087,11 @@ delete from Songs
             on Q1.ID = Q2.SongID
          where Q2.SongID is null
              )
-EOF
+SQL
 }
 
 sub writeSongsWithoutBeatSaviourStats {
-  my $data = $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0];
+  my $data = $dbh->selectall_arrayref(<<'SQL', undef, $0)->[0][0];
 with weWantToPlayThisAgain as (
   select Q2.SongID,
          Q1.LevelID,
@@ -3144,7 +3145,7 @@ select json_object(
   from RowNum
  where RowNum = 1
 order by LastScore desc
-EOF
+SQL
 
   my $target = catfile($PlaylistFolder, 'play-again.bplist');
 
@@ -3157,7 +3158,7 @@ EOF
 }
 
 sub writeSongsToImprove {
-  write_file(catfile($PlaylistFolder, 'to-improve.bplist'), $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
+  write_file(catfile($PlaylistFolder, 'to-improve.bplist'), $dbh->selectall_arrayref(<<'SQL', undef, $0)->[0][0]);
 with toImprove as (
   select Q1.LevelID,
          GameMode,
@@ -3200,11 +3201,11 @@ select json_object(
          )
        )
   from toImprove
-EOF
+SQL
 }
 
 sub writeNotPlayedSongs {
-  write_file(catfile($PlaylistFolder, 'not-played.bplist'), $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
+  write_file(catfile($PlaylistFolder, 'not-played.bplist'), $dbh->selectall_arrayref(<<'SQL', undef, $0)->[0][0]);
 with ranked as (
 select SongID,
        Q1.LevelID,
@@ -3273,9 +3274,9 @@ select json_object(
        )
   from RowNum
  where RowNum = 1
-EOF
+SQL
 
-  write_file(catfile($PlaylistFolder, 'not-played-hard.bplist'), $dbh->selectall_arrayref(<<'EOF', undef, $0)->[0][0]);
+  write_file(catfile($PlaylistFolder, 'not-played-hard.bplist'), $dbh->selectall_arrayref(<<'SQL', undef, $0)->[0][0]);
 with ranked as (
 select SongID,
        Q1.LevelID,
@@ -3344,10 +3345,10 @@ select json_object(
        )
   from RowNum
  where RowNum = 1
-EOF
+SQL
 }
 
-create_view(<<'EOF');
+create_view(<<'SQL');
 CREATE VIEW WorkoutPlan AS
 with
 combined as (
@@ -3456,12 +3457,12 @@ select SongID,
        percent_rank() over (order by WeightControlRatio asc nulls first) as Workout2Rank
   from calculations,
        averages
-EOF
+SQL
 
 sub writeWorkout {
   my $targetWorkoutDuration = 40 * 60;
 
-  write_file(catfile($PlaylistFolder, 'workout.bplist'), $dbh->selectall_arrayref(<<EOF, undef, $0)->[0][0]);
+  write_file(catfile($PlaylistFolder, 'workout.bplist'), $dbh->selectall_arrayref(<<SQL, undef, $0)->[0][0]);
 with CombinedOrder as (
 select Q1.*,
        (ImprovementRank + 0.5)
@@ -3534,13 +3535,13 @@ select json_object(
          )
        )
   from FinalOrder
-EOF
+SQL
 }
 
 sub writeWorkout2 {
   my $targetWorkoutDuration = 40 * 60;
 
-  write_file(catfile($PlaylistFolder, 'workout2.bplist'), $dbh->selectall_arrayref(<<EOF, undef, $0)->[0][0]);
+  write_file(catfile($PlaylistFolder, 'workout2.bplist'), $dbh->selectall_arrayref(<<SQL, undef, $0)->[0][0]);
 with CombinedOrder as (
 select Q1.*,
        (ImprovementRank + 0.5)
@@ -3613,15 +3614,15 @@ select json_object(
          )
        )
   from FinalOrder
-EOF
+SQL
 }
 
 sub updateSettings {
-  my $getEnableLeftHanded = $dbh->prepare(<<'EOF');
+  my $getEnableLeftHanded = $dbh->prepare(<<'SQL');
 select sum(LeftHandDistance) - sum(RightHandDistance)
   from BeatSaviourData
  where FileDate >= julianday('now') - 7
-EOF
+SQL
 
   $getEnableLeftHanded->execute();
 
@@ -3636,13 +3637,13 @@ EOF
   my $playerDataFile = catfile($BeatSaberAppdataFolder, "PlayerData.dat");
   my $playerData = read_file($playerDataFile);
 
-  my ($newPlayerData) = @{$dbh->selectall_arrayref(<<'EOF', undef, $playerData, $enableLeftHanded < 0 ? 'true' : 'false')};
+  my ($newPlayerData) = @{$dbh->selectall_arrayref(<<'SQL', undef, $playerData, $enableLeftHanded < 0 ? 'true' : 'false')};
 select json_replace(
          json(?1),
          '$.localPlayers[0].playerSpecificSettings.leftHanded',
          json(?2)
        )
-EOF
+SQL
 
   if ($newPlayerData ne $playerData) {
     write_file($playerDataFile, $newPlayerData);
@@ -3759,7 +3760,7 @@ if (defined $runType) {
   binmode(STDERR, ":utf8");
 
   #updateProjectedAccuracy();
-  mergeSongFiles();
+  #mergeSongFiles();
 
   exit 0;
 }
